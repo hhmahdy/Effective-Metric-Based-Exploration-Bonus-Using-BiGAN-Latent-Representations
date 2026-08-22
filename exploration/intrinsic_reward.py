@@ -28,6 +28,7 @@ from torch import Tensor
 from exploration.ensemble_scaling import EnsembleRewardVariance
 from exploration.novelty import NormalizedNoveltyScore, NoveltyComponents
 from exploration.state_discrepancy import LatentStateDiscrepancy
+EME_MODES = {"clamped", "normalised"}
 
 
 NoveltyLike = Any
@@ -149,9 +150,39 @@ class MetricIntrinsicReward:
         ensemble: Optional ensemble supplying ``zeta(r)``. When ``None`` the
             scaling factor is identically one, which yields the latent-only
             ablation.
+        eme_mode: How ``zeta(r)`` becomes a scaling factor.
+
+            ``"clamped"`` is EME as published,
+            ``scale = min(max(zeta, min_reward_scaling), M)``. It assumes
+            ``zeta`` lives on the order of one, which holds for shaped rewards
+            but not for sparse Atari rewards: when almost every target is zero
+            the members agree, ``zeta << 1``, the lower clamp binds, and the
+            variant degenerates to the unscaled latent bonus.
+
+            ``"normalised"`` divides by the running mean of ``zeta`` instead,
+            ``scale = zeta / E[zeta]``, capped at ``M``. The factor is then
+            scale-free: it is one for a transition of typical disagreement and
+            greater than one exactly where the ensemble disagrees more than it
+            usually does, whatever the reward magnitude. The ratio is exact --
+            no epsilon enters the numerator, because an additive constant would
+            pull the factor back towards one precisely in the tiny-``zeta``
+            regime the mode exists to rescue.
         max_reward_scaling: Upper clamp ``M`` on the scaling factor.
-        min_reward_scaling: Lower clamp, one in the EME formulation, so the
-            bonus is never shrunk below the pure metric distance.
+        min_reward_scaling: Lower clamp of the ``"clamped"`` mode, one in the
+            EME formulation, so the bonus is never shrunk below the pure metric
+            distance. It is not applied in ``"normalised"`` mode.
+        zeta_momentum: Momentum of the exponential moving average estimating
+            ``E[zeta]``. A cumulative mean would grow steadily staler over a
+            multi-million-step run -- once ``zeta`` starts rising, every batch
+            would look anomalous relative to the whole history and the factor
+            would saturate at ``M``. An EMA keeps the reference level on recent
+            experience, so the factor stays centred near one and continues to
+            discriminate. ``0.0`` compares against the current batch only.
+        zeta_epsilon: Degeneracy threshold of the normalised mode. When the
+            running mean of ``zeta`` does not exceed it the ensemble carries no
+            usable signal, and the scaling factor falls back to one so the
+            variant reduces to the pure metric bonus instead of zeroing the
+            exploration reward.
         norm: ``"L1"`` or ``"L2"`` latent norm.
         normalize: Whether to map the raw bonus onto the extrinsic-reward scale
             with Adventurer's Eq. (5) running normalization. Keeping this on
@@ -174,6 +205,9 @@ class MetricIntrinsicReward:
         ensemble: Optional[EnsembleRewardVariance] = None,
         max_reward_scaling: float = 5.0,
         min_reward_scaling: float = 1.0,
+        eme_mode: str = "clamped",
+        zeta_momentum: float = 0.99,
+        zeta_epsilon: float = 1.0e-12,
         norm: str = "L2",
         normalize: bool = True,
         normalization_epsilon: float = 1.0e-8,
@@ -187,8 +221,16 @@ class MetricIntrinsicReward:
             settings, and device.
         Output: Initialized bonus operator.
         Mathematical meaning: Defines
-            ``b_t=||E(s_t)-E(s_{t+1})||_p * min(max(zeta(r),1),M)``.
+            ``b_t=||E(s_t)-E(s_{t+1})||_p * zeta_scale``, where ``zeta_scale``
+            is ``min(max(zeta,1),M)`` in clamped mode and
+            ``min(zeta/E[zeta], M)`` in normalised mode.
         """
+        if eme_mode not in EME_MODES:
+            raise ValueError("eme_mode must be 'clamped' or 'normalised'")
+        if zeta_epsilon <= 0.0:
+            raise ValueError("zeta_epsilon must be positive")
+        if not 0.0 <= zeta_momentum < 1.0:
+            raise ValueError("zeta_momentum must satisfy 0 <= momentum < 1")
         if max_reward_scaling <= 0.0 or min_reward_scaling <= 0.0:
             raise ValueError("scaling bounds must be positive")
         if max_reward_scaling < min_reward_scaling:
@@ -202,6 +244,10 @@ class MetricIntrinsicReward:
         self.ensemble = ensemble
         self.max_reward_scaling = float(max_reward_scaling)
         self.min_reward_scaling = float(min_reward_scaling)
+        self.eme_mode = eme_mode
+        self.zeta_epsilon = float(zeta_epsilon)
+        self.zeta_momentum = float(zeta_momentum)
+        self._mean_zeta: Optional[Tensor] = None
         self.normalize = bool(normalize)
         self.calculator = IntrinsicRewardCalculator(clip_value)
         if normalization_clip is not None and normalization_clip <= 0.0:
@@ -212,20 +258,74 @@ class MetricIntrinsicReward:
             device=self.device,
         )
 
-    def scaling_factor(self, obs_tp1: Tensor) -> tuple[Tensor, Tensor]:
-        """Return the raw ensemble variance and its clamped scaling factor.
+    @property
+    def mean_zeta(self) -> float:
+        """Return the current estimate of the mean ensemble variance.
 
-        Input: Next-observation batch ``[B, *observation_shape]``.
+        Input: This bonus operator.
+        Output: Non-negative float, zero before any batch has been seen.
+        Mathematical meaning: Estimates ``E[zeta(r)]`` by exponential moving
+            average, the reference level against which the normalised mode
+            measures disagreement.
+        """
+        if self._mean_zeta is None:
+            return 0.0
+        return float(self._mean_zeta.item())
+
+    def _update_mean_zeta(self, variance: Tensor) -> Tensor:
+        """Fold one batch of variances into the moving reference level.
+
+        Input: Ensemble variance batch ``[B]``.
+        Output: Updated scalar estimate of ``E[zeta]``.
+        Mathematical meaning: Applies
+            ``m <- momentum*m + (1-momentum)*mean(zeta_batch)``, seeded by the
+            first observed batch mean so no zero-initialization bias is carried
+            into early scaling factors.
+        """
+        batch_mean = variance.detach().mean().to(self.device)
+        if self._mean_zeta is None:
+            self._mean_zeta = batch_mean.clone()
+        else:
+            self._mean_zeta.mul_(self.zeta_momentum).add_(
+                batch_mean * (1.0 - self.zeta_momentum)
+            )
+        return self._mean_zeta
+
+    def scaling_factor(
+        self,
+        obs_tp1: Tensor,
+        update_statistics: bool = True,
+    ) -> tuple[Tensor, Tensor]:
+        """Return the raw ensemble variance and the resulting scaling factor.
+
+        Input: Next-observation batch ``[B, *observation_shape]`` and a flag
+            controlling whether the running ``zeta`` mean is updated.
         Output: ``(zeta, scale)`` tensors, both shaped ``[B]``.
         Mathematical meaning: Computes ``zeta(r)=Var_k(hat r_k(s_{t+1}))`` and
-            ``min(max(zeta,1),M)``; without an ensemble both terms are one.
+            maps it to ``min(max(zeta,min),M)`` in clamped mode or to
+            ``min(zeta/E[zeta],M)`` in normalised mode. Without an ensemble, or
+            with a degenerate one, both terms are one.
         """
         if self.ensemble is None:
             ones = torch.ones(obs_tp1.shape[0], device=self.device)
             return ones.clone(), ones
         variance = self.ensemble.get_variance(obs_tp1).to(self.device).float()
-        scale = variance.clamp(min=self.min_reward_scaling, max=self.max_reward_scaling)
-        return variance, scale
+        if self.eme_mode == "clamped":
+            scale = variance.clamp(
+                min=self.min_reward_scaling, max=self.max_reward_scaling
+            )
+            return variance, scale
+        if update_statistics:
+            self._update_mean_zeta(variance)
+        mean_zeta = torch.as_tensor(
+            self.mean_zeta, device=variance.device, dtype=variance.dtype
+        )
+        if float(mean_zeta) <= self.zeta_epsilon:
+            # A degenerate ensemble carries no signal: fall back to the pure
+            # metric bonus rather than zeroing the exploration reward.
+            return variance, torch.ones_like(variance)
+        scale = variance / mean_zeta
+        return variance, scale.clamp(max=self.max_reward_scaling)
 
     @torch.no_grad()
     def __call__(
@@ -247,7 +347,7 @@ class MetricIntrinsicReward:
         obs_t = obs_t.to(self.device)
         obs_tp1 = obs_tp1.to(self.device)
         latent_distance = self.discrepancy(obs_t, obs_tp1)
-        variance, scale = self.scaling_factor(obs_tp1)
+        variance, scale = self.scaling_factor(obs_tp1, update_statistics)
         bonus = latent_distance * scale
         if self.normalize:
             normalized = self.normalized_score(

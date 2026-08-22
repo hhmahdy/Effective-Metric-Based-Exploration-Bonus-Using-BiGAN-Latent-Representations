@@ -4,7 +4,12 @@
 # Variants (Contribution 2):
 #   V1 Baseline    Adventurer reconstruction novelty B(s)
 #   V2 Latent only b_t = ||E(s_t) - E(s_{t+1})||_2          (zeta == 1)
-#   V3 Ours        b_t = ||E(s_t) - E(s_{t+1})||_2 * min(max(zeta(r), 1), M)
+#   V3 EME exactly b_t = ||E(s_t) - E(s_{t+1})||_2 * min(max(zeta(r), 1), M)
+#   V4 Ours        b_t = ||E(s_t) - E(s_{t+1})||_2 * min(zeta(r) / E[zeta], M)
+#
+# V3 reproduces published EME. On sparse-reward Atari its lower clamp binds
+# almost everywhere, so V4 normalises zeta by its own running mean instead and
+# stays informative at any reward magnitude.
 #
 # Example:
 #   ENVIRONMENT_ID=ALE/MontezumaRevenge-v5 SEEDS="0 1 2" ./run_metric_eme_comparison.sh
@@ -73,6 +78,7 @@ for seed in ${SEEDS}; do
     V1_RUN="${SEED_ROOT}/v1-adventurer-bigan"
     V2_RUN="${SEED_ROOT}/v2-latent-discrepancy"
     V3_RUN="${SEED_ROOT}/v3-latent-discrepancy-eme"
+    V4_RUN="${SEED_ROOT}/v4-latent-discrepancy-eme-normalised"
     COMPARISON_RUN="${SEED_ROOT}/comparison"
 
     echo "============================================================"
@@ -83,30 +89,37 @@ for seed in ${SEEDS}; do
         --novelty bigan --state-alpha 0.9
     run_variant "${seed}" "V2 latent discrepancy only" "${V2_RUN}" \
         --novelty latent_discrepancy --latent-norm "${LATENT_NORM}"
-    run_variant "${seed}" "V3 latent discrepancy + EME scaling" "${V3_RUN}" \
-        --novelty latent_discrepancy --eme True \
+    run_variant "${seed}" "V3 latent discrepancy + clamped EME scaling" "${V3_RUN}" \
+        --novelty latent_discrepancy --eme True --eme-mode clamped \
+        --ensemble_K "${ENSEMBLE_K}" \
+        --max-reward-scaling "${MAX_REWARD_SCALING}" \
+        --latent-norm "${LATENT_NORM}"
+    run_variant "${seed}" "V4 latent discrepancy + normalised EME scaling" "${V4_RUN}" \
+        --novelty latent_discrepancy --eme True --eme-mode normalised \
         --ensemble_K "${ENSEMBLE_K}" \
         --max-reward-scaling "${MAX_REWARD_SCALING}" \
         --latent-norm "${LATENT_NORM}"
 
-    python - <<'PY' "${V1_RUN}" "${V2_RUN}" "${V3_RUN}" "${COMPARISON_RUN}" "${SMOOTHING_WINDOW}"
+    python - <<'PY' "${V1_RUN}" "${V2_RUN}" "${V3_RUN}" "${V4_RUN}" "${COMPARISON_RUN}" "${SMOOTHING_WINDOW}"
 import sys
 from pathlib import Path
 
 from evaluation.comparison import save_multi_game_score_comparison
 
-v1_run, v2_run, v3_run, comparison_run, smoothing_window = (
+v1_run, v2_run, v3_run, v4_run, comparison_run, smoothing_window = (
     Path(sys.argv[1]),
     Path(sys.argv[2]),
     Path(sys.argv[3]),
     Path(sys.argv[4]),
-    int(sys.argv[5]),
+    Path(sys.argv[5]),
+    int(sys.argv[6]),
 )
 
 runs = {
     "V1 Adventurer (BiGAN novelty)": v1_run,
     "V2 Latent discrepancy": v2_run,
-    "V3 Latent discrepancy + EME": v3_run,
+    "V3 Latent + clamped EME": v3_run,
+    "V4 Latent + normalised EME": v4_run,
 }
 
 figures = [
@@ -134,12 +147,14 @@ for metric_name, y_label, file_stem in figures:
 # Diagnostics that only exist for the metric-based variants.
 metric_runs = {
     "V2 Latent discrepancy": v2_run,
-    "V3 Latent discrepancy + EME": v3_run,
+    "V3 Latent + clamped EME": v3_run,
+    "V4 Latent + normalised EME": v4_run,
 }
 diagnostics = [
     ("intrinsic/latent_distance", "||E(s_t) - E(s_t+1)||", "latent_distance"),
     ("intrinsic/ensemble_variance", "Ensemble Variance", "ensemble_variance"),
     ("intrinsic/bonus_scale", "Bonus Scale", "bonus_scale"),
+    ("intrinsic/bonus", "Raw Bonus b_t", "raw_bonus"),
 ]
 for metric_name, y_label, file_stem in diagnostics:
     try:

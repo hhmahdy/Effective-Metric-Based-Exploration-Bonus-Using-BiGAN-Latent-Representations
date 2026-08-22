@@ -277,13 +277,28 @@ class MetricEMEConfig:
     ``enabled`` switches the bonus on; ``ensemble_scaling`` switches the EME
     factor ``zeta(r)`` on. Enabling only the former gives the latent-only
     ablation in which the scaling factor is identically one.
+
+    ``eme_mode`` selects how ``zeta(r)`` becomes a scaling factor:
+
+    * ``"clamped"`` -- ``min(max(zeta, min_reward_scaling), M)``, EME as
+      published. Assumes ``zeta`` is of order one, which fails for sparse
+      rewards: near-zero regression targets make the members agree, the lower
+      clamp binds, and the variant collapses onto the unscaled latent bonus.
+    * ``"normalised"`` -- ``min(zeta/E[zeta], M)``, scale-free and therefore
+      informative at any reward magnitude. Recommended for sparse-reward Atari.
+      ``E[zeta]`` is an exponential moving average with momentum
+      ``zeta_momentum``, and ``zeta_epsilon`` is the degeneracy threshold below
+      which the factor falls back to one.
     """
 
     enabled: bool = False
     ensemble_scaling: bool = True
     ensemble_size: int = 5                # K
+    eme_mode: str = "clamped"             # {clamped, normalised}
     max_reward_scaling: float = 5.0       # M
-    min_reward_scaling: float = 1.0       # lower clamp of zeta(r)
+    min_reward_scaling: float = 1.0       # lower clamp of zeta(r), clamped mode
+    zeta_momentum: float = 0.99           # EMA momentum of E[zeta]
+    zeta_epsilon: float = 1.0e-12         # degeneracy threshold, normalised mode
     latent_norm: str = "L2"               # {L1, L2}
     ensemble_hidden_dim: int = 256
     ensemble_learning_rate: float = 1.0e-3
@@ -304,11 +319,17 @@ class MetricEMEConfig:
         Input: Values supplied to this dataclass.
         Output: No value; raises ``ValueError`` for invalid settings.
         Mathematical meaning: Guarantees a well-defined metric ``||.||_p``, a
-            non-degenerate ensemble variance (``K>=2``), and a clamp interval
-            ``[min, M]`` that never inverts.
+            non-degenerate ensemble variance (``K>=2``), a supported scaling
+            mode, and a clamp interval ``[min, M]`` that never inverts.
         """
         if self.latent_norm not in {"L1", "L2"}:
             raise ValueError("latent_norm must be 'L1' or 'L2'")
+        if self.eme_mode not in {"clamped", "normalised"}:
+            raise ValueError("eme_mode must be 'clamped' or 'normalised'")
+        if self.zeta_epsilon <= 0.0:
+            raise ValueError("zeta_epsilon must be positive")
+        if not 0.0 <= self.zeta_momentum < 1.0:
+            raise ValueError("zeta_momentum must satisfy 0 <= zeta_momentum < 1")
         if self.ensemble_input not in {"latent", "observation"}:
             raise ValueError("ensemble_input must be 'latent' or 'observation'")
         if self.ensemble_size < 2:

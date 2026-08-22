@@ -629,9 +629,19 @@ the latent distance and the clamped scale.
   independently masked subset of the collected data
   (`ensemble_bootstrap_probability`, default `0.5`). Sharing one data set makes
   the members converge and collapses `zeta(r)` to zero.
-- **Clamping.** `min(max(zeta,1),M)` means the bonus is never smaller than the
-  pure metric distance and never inflated by more than `M`; early in training
-  `zeta` is typically far below one, so V3 initially behaves like V2.
+- **Scaling mode.** `--eme-mode clamped` (default) is EME as published,
+  `min(max(zeta,1),M)`: the bonus is never smaller than the pure metric
+  distance and never inflated by more than `M`. That formulation assumes `zeta`
+  is of order one, which holds for shaped rewards but not for sparse Atari
+  rewards -- with almost all regression targets equal to zero the members agree,
+  `zeta << 1`, the lower clamp binds everywhere, and V3 collapses onto V2.
+  `--eme-mode normalised` divides by the running mean instead,
+  `min(zeta/E[zeta], M)`, which is scale-free and therefore ranks transitions
+  correctly at any reward magnitude. The ratio is exact: adding an epsilon to
+  the numerator would pull the factor back towards one in exactly the tiny-`zeta`
+  regime the mode exists to rescue. If the running mean itself falls below
+  `zeta_epsilon` the ensemble is treated as degenerate and the factor falls back
+  to one, so the bonus degrades to V2 rather than to zero reward.
 - **Normalization.** The raw `b_t` is passed through Adventurer's Eq. (5)
   running normalization by default so the intrinsic stream stays on the
   extrinsic-reward scale and `beta` keeps the same meaning across variants.
@@ -649,7 +659,31 @@ the latent distance and the clamped scale.
 |---------|---------|
 | **V1 (Baseline)** Adventurer original | `python main.py --env ALE/MontezumaRevenge-v5 --novelty bigan` |
 | **V2** Latent discrepancy only | `python main.py --env ALE/MontezumaRevenge-v5 --novelty latent_discrepancy` |
-| **V3 (Ours)** Latent + EME scaling | `python main.py --env ALE/MontezumaRevenge-v5 --novelty latent_discrepancy --eme True --ensemble_K 5` |
+| **V3** Latent + clamped `zeta` (EME exactly) | `python main.py --env ALE/MontezumaRevenge-v5 --novelty latent_discrepancy --eme True --ensemble_K 5` |
+| **V4 (Ours)** Latent + normalised `zeta` | `python main.py --env ALE/MontezumaRevenge-v5 --novelty latent_discrepancy --eme True --eme-mode normalised --ensemble_K 5` |
+
+The four variants isolate one factor each: V2 removes EME's scaling from the
+metric bonus, V3 restores it in its published clamped form, and V4 replaces the
+clamp with mean normalization. On a sparse-reward game V3 and V2 are expected to
+coincide wherever `zeta < 1`, which is what makes V4 the informative comparison
+rather than a redundant fourth curve.
+
+A 512-step CartPole run makes the collapse concrete. Over sixteen PPO updates
+the raw ensemble variance rises from `4.6e-5` to `7.5e-3` and never approaches
+one, so the two modes see identical `zeta` and produce very different factors:
+
+| Update | `zeta` | V3 scale (clamped) | V4 scale (normalised) |
+|--------|--------|--------------------|-----------------------|
+| 1 | 4.6e-5 | 1.000 | 2.68 |
+| 6 | 2.8e-4 | 1.000 | 3.41 |
+| 11 | 1.6e-3 | 1.000 | 3.40 |
+| 16 | 5.3e-3 | 1.000 | 2.74 |
+
+V3's factor is constant at the clamp floor for every update, so its bonus is
+bit-for-bit V2's. V4's factor varies with the ensemble and, because `E[zeta]` is
+an EMA rather than a cumulative mean, it tracks the rising variance instead of
+saturating at `M`. `--zeta-momentum` (default `0.99`, roughly a hundred-batch
+horizon) sets how quickly the reference level adapts.
 
 `--env` is an alias of `--environment-id`, and `--novelty` is an alias layer over
 `--novelty-type`: `bigan` and `state` select Adventurer novelty, `transition`
@@ -670,7 +704,8 @@ ENVIRONMENT_ID=ALE/MontezumaRevenge-v5 SEEDS="0 1 2" ./run_metric_eme_comparison
 | Tag | Meaning |
 |-----|---------|
 | `intrinsic/latent_distance` | mean `||E(s_t)-E(s_{t+1})||_p` |
-| `intrinsic/ensemble_variance` | mean raw `zeta(r)` before clamping |
+| `intrinsic/ensemble_variance` | mean raw `zeta(r)` before scaling |
+| `intrinsic/mean_ensemble_variance` | running `E[zeta]`, the normalised mode's divisor |
 | `intrinsic/bonus_scale` | mean `min(max(zeta,1),M)` |
 | `intrinsic/bonus` | mean raw bonus `b_t` |
 | `intrinsic/encoder_frozen` | `1.0` once the encoder metric is frozen |
@@ -715,6 +750,7 @@ Useful ablations include:
 - different PPO clipping coefficients,
 - `latent_norm` in `{L1, L2}` for the metric bonus,
 - `max_reward_scaling` (M) and `ensemble_size` (K) sweeps,
+- `eme_mode` in `{clamped, normalised}`,
 - frozen vs. continually trained encoder metric.
 
 ## License and Citation

@@ -51,6 +51,7 @@ class MetricEMEMetrics:
 
     latent_distance: float
     ensemble_variance: float
+    mean_ensemble_variance: float
     bonus_scale: float
     bonus: float
     encoder_frozen: bool
@@ -281,6 +282,9 @@ class AdventurerTrainer:
             ensemble=self.reward_ensemble,
             max_reward_scaling=settings.max_reward_scaling,
             min_reward_scaling=settings.min_reward_scaling,
+            eme_mode=settings.eme_mode,
+            zeta_momentum=settings.zeta_momentum,
+            zeta_epsilon=settings.zeta_epsilon,
             norm=settings.latent_norm,
             normalize=settings.normalize_bonus,
             normalization_epsilon=self.config.novelty.normalization_epsilon,
@@ -517,9 +521,11 @@ class AdventurerTrainer:
         if self.reward_ensemble is not None:
             for _ in range(self.config.metric_eme.ensemble_updates_per_rollout):
                 ensemble_metrics = self.reward_ensemble.update()
+        assert self.metric_reward is not None
         return MetricEMEMetrics(
             latent_distance=summary["latent_distance"],
             ensemble_variance=summary["ensemble_variance"],
+            mean_ensemble_variance=self.metric_reward.mean_zeta,
             bonus_scale=summary["bonus_scale"],
             bonus=summary["bonus"],
             encoder_frozen=bool(self.bigan.encoder_frozen),
@@ -542,6 +548,7 @@ class AdventurerTrainer:
         return {
             "intrinsic/latent_distance": metrics.latent_distance,
             "intrinsic/ensemble_variance": metrics.ensemble_variance,
+            "intrinsic/mean_ensemble_variance": metrics.mean_ensemble_variance,
             "intrinsic/bonus_scale": metrics.bonus_scale,
             "intrinsic/bonus": metrics.bonus,
             "intrinsic/encoder_frozen": float(metrics.encoder_frozen),

@@ -141,6 +141,16 @@ class ConstantVarianceEnsemble:
         return torch.full((observations.shape[0],), self.value)
 
 
+class ScriptedVarianceEnsemble:
+    """Ensemble stub returning a caller-supplied variance vector."""
+
+    def __init__(self, values: torch.Tensor) -> None:
+        self.values = values
+
+    def get_variance(self, observations: torch.Tensor) -> torch.Tensor:
+        return self.values
+
+
 class MetricIntrinsicRewardTest(unittest.TestCase):
     """Validate ``b_t = d_t * min(max(zeta, 1), M)`` and its clamping."""
 
@@ -200,6 +210,116 @@ class MetricIntrinsicRewardTest(unittest.TestCase):
             )
 
 
+class NormalisedEMEModeTest(unittest.TestCase):
+    """Validate the scale-free mode ``zeta / running_mean(zeta)``."""
+
+    def _reward(
+        self,
+        ensemble,
+        maximum: float = 5.0,
+        momentum: float = 0.0,
+    ) -> MetricIntrinsicReward:
+        return MetricIntrinsicReward(
+            encoder=IdentityEncoder(3),
+            ensemble=ensemble,
+            eme_mode="normalised",
+            zeta_momentum=momentum,
+            max_reward_scaling=maximum,
+            normalize=False,
+        )
+
+    def test_scale_is_the_ratio_to_the_running_mean(self) -> None:
+        variances = torch.tensor([1.0e-6, 3.0e-6])  # far below the clamp floor
+        reward = self._reward(ScriptedVarianceEnsemble(variances))
+        obs_t = torch.zeros(2, 3)
+        obs_tp1 = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        components = reward(obs_t, obs_tp1)
+        # The batch mean is 2e-6, so the two factors are 0.5 and 1.5 even though
+        # both raw variances are six orders of magnitude below the clamp floor.
+        self.assertTrue(
+            torch.allclose(components.bonus_scale, torch.tensor([0.5, 1.5]), atol=1e-5)
+        )
+
+    def test_sparse_rewards_do_not_collapse_the_scale_unlike_clamped_mode(self) -> None:
+        variances = torch.tensor([1.0e-8, 4.0e-8])
+        obs_t = torch.zeros(2, 3)
+        obs_tp1 = torch.tensor([[2.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+
+        clamped = MetricIntrinsicReward(
+            encoder=IdentityEncoder(3),
+            ensemble=ScriptedVarianceEnsemble(variances),
+            eme_mode="clamped",
+            normalize=False,
+        )
+        clamped_scale = clamped(obs_t, obs_tp1).bonus_scale
+        # The lower clamp binds for both transitions: V3 cannot separate them.
+        self.assertTrue(torch.allclose(clamped_scale, torch.ones(2)))
+
+        normalised_scale = self._reward(ScriptedVarianceEnsemble(variances))(
+            obs_t, obs_tp1
+        ).bonus_scale
+        # The normalised mode still ranks the more surprising transition higher.
+        self.assertGreater(float(normalised_scale[1]), float(normalised_scale[0]))
+        self.assertAlmostEqual(float(normalised_scale.mean()), 1.0, places=3)
+
+    def test_degenerate_ensemble_falls_back_to_the_metric_bonus(self) -> None:
+        reward = self._reward(ConstantVarianceEnsemble(0.0))
+        components = reward(torch.zeros(4, 3), torch.randn(4, 3))
+        # A zero-variance ensemble reproduces V2 rather than zeroing the
+        # exploration signal.
+        self.assertTrue(torch.allclose(components.bonus_scale, torch.ones(4)))
+        self.assertTrue(
+            torch.allclose(components.combined_score, components.latent_distance)
+        )
+
+    def test_scale_is_capped_at_the_maximum(self) -> None:
+        reward = self._reward(ScriptedVarianceEnsemble(torch.tensor([0.0, 100.0])), maximum=5.0)
+        scale = reward(torch.zeros(2, 3), torch.randn(2, 3)).bonus_scale
+        self.assertLessEqual(float(scale.max()), 5.0)
+
+    def test_reference_level_is_an_exponential_moving_average(self) -> None:
+        reward = self._reward(
+            ScriptedVarianceEnsemble(torch.tensor([2.0, 4.0])), momentum=0.9
+        )
+        obs_t, obs_tp1 = torch.zeros(2, 3), torch.randn(2, 3)
+        reward(obs_t, obs_tp1)
+        # The EMA is seeded with the first batch mean, (2+4)/2 = 3.
+        self.assertAlmostEqual(reward.mean_zeta, 3.0, places=5)
+        reward.ensemble = ScriptedVarianceEnsemble(torch.tensor([6.0, 12.0]))
+        reward(obs_t, obs_tp1)
+        # 0.9*3 + 0.1*9 = 3.6, versus 6.0 for a cumulative mean.
+        self.assertAlmostEqual(reward.mean_zeta, 3.6, places=5)
+
+    def test_moving_average_tracks_a_rising_variance(self) -> None:
+        """A drifting zeta must not saturate the factor at the cap."""
+        ensemble = ScriptedVarianceEnsemble(torch.tensor([1.0, 1.0]))
+        reward = self._reward(ensemble, momentum=0.9)
+        obs_t, obs_tp1 = torch.zeros(2, 3), torch.randn(2, 3)
+        scales = []
+        for exponent in range(40):
+            # Geometrically increasing disagreement, as in a run that keeps
+            # discovering reward structure.
+            value = 1.5 ** exponent
+            reward.ensemble = ScriptedVarianceEnsemble(torch.tensor([value, value]))
+            scales.append(float(reward(obs_t, obs_tp1).bonus_scale.mean()))
+        # The EMA keeps up, so late factors stay well below the cap of five.
+        self.assertLess(max(scales[-10:]), 5.0)
+        self.assertGreater(min(scales[-10:]), 1.0)
+
+    def test_statistics_are_not_updated_when_disabled(self) -> None:
+        reward = self._reward(ScriptedVarianceEnsemble(torch.tensor([2.0, 4.0])))
+        reward(torch.zeros(2, 3), torch.randn(2, 3), update_statistics=False)
+        self.assertEqual(reward.mean_zeta, 0.0)
+
+    def test_rejects_unknown_mode(self) -> None:
+        with self.assertRaises(ValueError):
+            MetricIntrinsicReward(encoder=IdentityEncoder(3), eme_mode="scaled")
+
+    def test_rejects_invalid_momentum(self) -> None:
+        with self.assertRaises(ValueError):
+            MetricIntrinsicReward(encoder=IdentityEncoder(3), zeta_momentum=1.0)
+
+
 class MetricEMEConfigTest(unittest.TestCase):
     """Validate configuration guards for the new experiment variants."""
 
@@ -209,6 +329,7 @@ class MetricEMEConfigTest(unittest.TestCase):
         self.assertEqual(config.ensemble_size, 5)
         self.assertEqual(config.max_reward_scaling, 5.0)
         self.assertEqual(config.latent_norm, "L2")
+        self.assertEqual(config.eme_mode, "clamped")
 
     def test_invalid_settings_raise(self) -> None:
         for kwargs in (
@@ -217,6 +338,10 @@ class MetricEMEConfigTest(unittest.TestCase):
             {"max_reward_scaling": 0.5, "min_reward_scaling": 1.0},
             {"ensemble_bootstrap_probability": 0.0},
             {"ensemble_input": "pixels"},
+            {"eme_mode": "scaled"},
+            {"zeta_epsilon": 0.0},
+            {"zeta_momentum": 1.0},
+            {"zeta_momentum": -0.1},
         ):
             with self.subTest(**kwargs):
                 with self.assertRaises(ValueError):

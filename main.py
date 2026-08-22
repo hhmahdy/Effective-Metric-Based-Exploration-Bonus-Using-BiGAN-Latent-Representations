@@ -120,6 +120,22 @@ def parse_args() -> argparse.Namespace:
         default=5.0,
         help="upper clamp M applied to zeta(r)",
     )
+    parser.add_argument(
+        "--eme-mode",
+        choices=["clamped", "normalised", "normalized"],
+        default="clamped",
+        help=(
+            "'clamped' is EME as published, min(max(zeta,1),M); 'normalised' "
+            "divides zeta by its running mean, which stays informative when "
+            "sparse rewards drive the raw variance far below one"
+        ),
+    )
+    parser.add_argument(
+        "--zeta-momentum",
+        type=float,
+        default=0.99,
+        help="EMA momentum of E[zeta] used by --eme-mode normalised",
+    )
     parser.add_argument("--latent-norm", choices=["L1", "L2"], default="L2")
     parser.add_argument("--ensemble-input", choices=["latent", "observation"], default="latent")
     parser.add_argument("--ensemble-hidden-dim", type=int, default=256)
@@ -262,6 +278,9 @@ def build_config(
         enabled=metric_enabled or ensemble_scaling,
         ensemble_scaling=ensemble_scaling,
         ensemble_size=args.ensemble_size,
+        # "normalized" is accepted as a spelling variant of "normalised".
+        eme_mode="clamped" if args.eme_mode == "clamped" else "normalised",
+        zeta_momentum=args.zeta_momentum,
         max_reward_scaling=args.max_reward_scaling,
         latent_norm=args.latent_norm,
         ensemble_input=args.ensemble_input,
