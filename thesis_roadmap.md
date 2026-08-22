@@ -108,10 +108,32 @@ Source: `https://proceedings.neurips.cc/paper_files/paper/2024/file/6a39cf3b666f
 - Ferns et al. (2004) [Bisimulation Metrics]
 - Zhang et al. (2020) [Bisimulation in DRL]
 
+**MDPO Paper Key Details (Tomar et al., 2022) — Extracted from arXiv:2005.09814 (ICLR 2022)**
+
+Source: `https://arxiv.org/pdf/2005.09814`
+
+- **MD in Convex Optimization (§2.1)**: $x_{k+1} \in \arg\min_{x \in C} \langle \nabla f(x_k), x - x_k \rangle + \frac{1}{t_k} B_\psi(x, x_k)$, where $B_\psi$ is the Bregman divergence. When $\psi$ is negative Shannon entropy → KL divergence → exponentiated gradient descent (Eq. 2).
+- **MD in RL (§3)**: Two update rules derived from MD principles: (Eq. 4) $\pi_{k+1}(\cdot|s) \leftarrow \arg\max_{\pi \in \Pi} \mathbb{E}_{a \sim \pi}[A^{\pi_k}(s,a)] - \frac{1}{t_k} \mathrm{KL}(s; \pi, \pi_k)$ and (Eq. 5) $\pi_{k+1} \leftarrow \arg\max_{\pi \in \Pi} \mathbb{E}_{s \sim \rho_{\pi_k}}[\mathbb{E}_{a \sim \pi}[A^{\pi_k}(s,a)] - \frac{1}{t_k} \mathrm{KL}(s; \pi, \pi_k)]$. Convergence: $\tilde{O}(1/\sqrt{K})$ for hard MDPs, $\tilde{O}(1/K)$ for soft MDPs.
+- **On-policy MDPO (§4.1)**: Uses Eq. 5; approximates trust-region via multiple SGD steps on the objective (not closed-form). Connection to TRPO: TRPO solves same objective with line search to enforce hard KL constraint; MDPO removes the hard constraint. Connection to PPO: PPO's clipped surrogate is a further relaxation; does not actually bound policy ratios (Wang et al. 2019; Engstrom et al. 2020).
+- **Off-policy MDPO (§4.2)**: Uses Eq. 4 with replay buffer; connection to SAC: if trust region defined w.r.t. uniform policy instead of old policy, off-policy MDPO coincides with SAC (Haarnoja et al. 2018).
+- **Key empirical finding**: Explicitly enforcing the trust-region constraint is *not* a necessity for high performance; TRPO consistently outperforms PPO (both vanilla and with code-level optimizations).
+
+**Ferns et al. (2004) Key Details — Extracted from arXiv:1207.4114 (UAI 2004)**
+
+Source: `https://arxiv.org/pdf/1207.4114`
+
+- **Bisimulation Metrics for MDPs**: Presents metrics for measuring state similarity in finite MDPs based on bisimulation. If metric distance is 0, states are bisimilar. Metrics vary smoothly with transition probabilities (unlike bisimulation equivalence which is brittle).
+- **Value Function Bound**: Metric distances are bounded relative to the optimal value function: $|V^*(s) - V^*(s')| \leq \frac{1}{1-\gamma} \cdot d(s, s')$ (up to scaling). This is the foundational result that EME's Theorem 2 extends.
+- **Applications**: State aggregation, nearest-neighbor function approximation, structuring value function approximators.
+
+**Exploration Survey Details — Verified from arXiv**
+
+- **Yang et al. (2021)**: arXiv:2109.06668 (`https://arxiv.org/pdf/2109.06668`). Taxonomy: two major categories (uncertainty-oriented exploration, intrinsic motivation-oriented exploration) + other notable methods. Covers both single-agent and multi-agent RL. Provides comprehensive empirical comparison of exploration methods on standard benchmarks. Key challenges identified: sparse rewards, noisy distractions, long horizons, non-stationary co-learners.
+- **Amin et al. (2021)**: arXiv:2109.00157 (`https://arxiv.org/pdf/2109.00157`). Taxonomy: undirected vs. directed exploration; further categories: reward-free methods (§4), randomization-based (§5), optimism-in-face-of-uncertainty (§6), optimal exploration-exploitation approximation (§7), probability matching / posterior sampling (§8). Sequential RL focus (not bandits).
+- **Ladosz et al. (2022)**: arXiv:2205.00824 (`https://arxiv.org/pdf/2205.00824`). Categories exploration as: reward novel states, reward diverse behaviours, goal-based, probabilistic, imitation-based, safe exploration, random-based. Compares approaches on complexity, computational effort, and overall performance. Published in Information Fusion.
+
 **Missing Information**:
-- The full MDPO paper (Tomar et al., 2022, ICLR) should be consulted for the precise mathematical derivation of on-policy and off-policy MDPO variants and their theoretical connections to TRPO and PPO.
-- Yang et al. (2021) and Ladosz et al. (2022) surveys should be consulted for the taxonomy overview in Section 2.2 (definitions and categorisation only; systematic comparisons deferred to Ch. 3).
-- Ferns et al. (2004) should be consulted for the formal bisimulation metric definition referenced in Section 2.6.
+- None remaining for Background chapter — all key references have been fetched and key details extracted.
 
 ---
 
@@ -142,7 +164,7 @@ Source: `https://proceedings.neurips.cc/paper_files/paper/2024/file/6a39cf3b666f
 - Stadie et al. (2015) [Intrinsic Curiosity]; Deng et al. (2020) [FICM]
 
 **Missing Information**:
-- Ferns et al. (2004) and Zhang et al. (2020) should be consulted for the formal bisimulation metric definition used in EME's theoretical analysis.
+- Zhang et al. (2020) should be consulted for the bisimulation-in-DRL extension referenced in §3.6 ( Ferns et al. 2004 already extracted, see Ch. 2 §2.6).
 - Houthooft et al. (2017) should be consulted for the variational information maximisation formulation referenced in §3.7.
 
 ---
@@ -287,8 +309,9 @@ Source: `https://proceedings.neurips.cc/paper_files/paper/2024/file/6a39cf3b666f
 | Count-Based Exploration with NN Density Models | Ostrovski et al. (2017), ICML 2017 | 2, 3 |
 | Large Scale Adversarial Representation Learning (BigBiGAN) | Donahue & Simonyan (2019), ICLR 2019 | 2, 3 |
 | Goodfellow et al. (2014) — GANs | Goodfellow et al. (2014), NIPS 2014 | 2 |
-| Exploration in DRL: A Comprehensive Survey | Yang et al. (2021), arXiv | 2, 3 |
-| Exploration in DRL: A Survey | Ladosz et al. (2022), arXiv | 2, 3 |
+| Exploration in DRL: A Comprehensive Survey | Yang et al. (2021), arXiv:2109.06668 | 2, 3 |
+| A Survey of Exploration Methods in RL | Amin et al. (2021), arXiv:2109.00157 | 2, 3 |
+| Exploration in DRL: A Survey | Ladosz et al. (2022), arXiv:2205.00824 | 2, 3 |
 | Policy Optimization with Stochastic Mirror Descent | Yang & Zhang (2019), arXiv | 2 |
 | Plan2Explore | Sekar et al. (2020), ICML 2020 | 3 |
 | Bootstrapped DQN | Osband et al. (2016), NIPS 2016 | 3 |
@@ -309,13 +332,13 @@ Source: `https://proceedings.neurips.cc/paper_files/paper/2024/file/6a39cf3b666f
 | 🔴 Critical | Experimental results: V1–V4 comparison on hard Atari (Montezuma's Revenge, Gravitar, Solaris) × 3+ seeds | 7 | ❌ Not in repo | **Run experiments** using `run_metric_eme_comparison.sh` with appropriate hardware (GPU required for Atari) |
 | 🔴 Critical | Ablation study results (α, β, K, M, L1/L2, frozen encoder) | 7 | ❌ Not in repo | **Run experiments** with modified configurations |
 | 🔴 Critical | Full Adventurer paper (for architecture details, CIFAR-10 validation, MuJoCo results) | 4, 7 | ⚠️ Available on arXiv | Download arXiv:2503.18612 |
-| 🟡 Important | Full MDPO paper (Tomar et al., 2022) — precise mathematical derivation and TRPO/PPO connections | 2, 3 | ⚠️ Not in repo | Download and cite the ICLR 2022 paper from OpenReview |
-| 🟡 Important | Exploration survey papers (Yang et al. 2021; Ladosz et al. 2022) — systematic comparison tables and benchmark results | 2, 3 | ⚠️ Not in repo | Download from arXiv |
+| 🟡 Important | Full MDPO paper (Tomar et al., 2022) — precise mathematical derivation and TRPO/PPO connections | 2, 3 | ✅ Verified (arXiv:2005.09814) | MD update rules (Eqs. 4–5), on-policy/off-policy variants, convergence rates, TRPO/PPO/SAC connections all extracted and recorded in Ch. 2 §2.6 above |
+| 🟡 Important | Exploration survey papers (Yang et al. 2021; Ladosz et al. 2022; Amin et al. 2021) — taxonomy, comparison tables, benchmark results | 2, 3 | ✅ Verified (arXiv:2109.06668, arXiv:2205.00824, arXiv:2109.00157) | Taxonomy structures and key categories extracted and recorded in Ch. 2 §2.6 above |
 | 🟡 Important | Formal proof that latent discrepancy $\|E(s_t) - E(s_{t+1})\|_p$ is a valid metric on state space | 5, 8 | ❌ Not available | Derive from BiGAN encoder invertibility (Donahue et al., 2017, Theorem 3) or cite EME's theoretical framework |
 | 🟡 Important | Formal proof that $\zeta / \mathbb{E}[\zeta]$ is scale-free | 6 | ❌ Not available | Straightforward derivation: if $r \to cr$ then $\hat{r}_k \to c\hat{r}_k$ (for linear models) so $\zeta \to c^2\zeta$ and $\mathbb{E}[\zeta] \to c^2\mathbb{E}[\zeta]$, hence the ratio is invariant |
 | 🟢 Desirable | Convergence analysis of EMA reference level | 6 | ❌ Not available | Standard EMA convergence analysis can be referenced from time-series literature |
 | 🟢 Desirable | Computational cost comparison (FLOPs, wall-clock time) V1 vs. V4 | 8 | ❌ Not available | Profile both variants on the same hardware |
-| 🟢 Desirable | Bisimulation metric references (Ferns et al. 2004; Zhang et al. 2020) | 2, 3 | ⚠️ Not in repo | Locate and cite |
+| 🟢 Desirable | Bisimulation metric references (Ferns et al. 2004 verified; Zhang et al. 2020 pending) | 2, 3 | ⚠️ Partial | Ferns et al. (2004) extracted (arXiv:1207.4114); Zhang et al. (2020) still needed |
 | 🟢 Desirable | Houthooft et al. (2017) VIME paper for §3.7 | 3 | ⚠️ Not in repo | Download from arXiv |
 | ✅ Done | Full EME paper (Wang et al., 2024) — theoretical derivation of bisimulation metric approximation and diversity-enhanced scaling factor | 2, 3, 5, 6 | ✅ Verified (OpenReview QpKWFLtZKi) | Theorems 1–2, Propositions 1–3, EME Metric Def. 2 Eq.4, Ensemble variance Eq.8, Diversity-enhanced scaling Eq.10, Tractable loss Eq.9, Method comparison Table 1 all extracted and recorded in Ch. 2 §2.6 above |
 
