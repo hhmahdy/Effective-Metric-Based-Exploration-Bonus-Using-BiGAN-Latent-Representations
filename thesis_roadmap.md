@@ -132,6 +132,39 @@ Source: `https://arxiv.org/pdf/1207.4114`
 - **Amin et al. (2021)**: arXiv:2109.00157 (`https://arxiv.org/pdf/2109.00157`). Taxonomy: undirected vs. directed exploration; further categories: reward-free methods (§4), randomization-based (§5), optimism-in-face-of-uncertainty (§6), optimal exploration-exploitation approximation (§7), probability matching / posterior sampling (§8). Sequential RL focus (not bandits).
 - **Ladosz et al. (2022)**: arXiv:2205.00824 (`https://arxiv.org/pdf/2205.00824`). Categories exploration as: reward novel states, reward diverse behaviours, goal-based, probabilistic, imitation-based, safe exploration, random-based. Compares approaches on complexity, computational effort, and overall performance. Published in Information Fusion.
 
+**LIBERTY Paper Key Details (Wang et al., 2023) — Extracted from NeurIPS 2023 paper**
+
+*This is the direct precursor to EME (NeurIPS 2024), by the same group. EME's Propositions 1–2 critique LIBERTY's approximations.*
+
+Source: `https://proceedings.neurips.cc/paper_files/paper/2023/file/79f7f00cbe3003cea4d0c2326b4c0b42-Paper-Conference.pdf` (also OpenReview: `0FhKURbTyF`)
+
+- **Full title**: Efficient Potential-based Exploration in Reinforcement Learning using Inverse Dynamic Bisimulation Metric
+- **Algorithm name**: LIBERTY (expLoration vIa Bisimulation mEtric-based sTate discrepancY)
+- **Key idea**: Potential-based exploration bonus via bisimulation metric potentials — $F(s_t, s_{t+1}) = \Phi(s_{t+1}) - \Phi(s_t)$ where $\Phi(s) = d_\mathrm{inv}(s, s_0)$ (Definition 3, Eq. 6), ensuring **policy invariance** (no optimal policy shift).
+- **Inverse Dynamic Bisimulation Metric (Definition 2)**: Extends standard bisimulation metric (Ferns et al. 2004) by incorporating inverse dynamic model discrepancy — captures action outcome differences between states, enabling more effective exploration than raw bisimulation.
+- **Theorem 1 (Convergence)**: The inverse dynamic bisimulation metric operator $\mathcal{H}$ has a least fixed point $\hat{d}$.
+- **Theorem 2 (Value Difference Bound)**: $|V^\pi(s_i) - V^\pi(s_j)| \leq d_\mathrm{inv}(s_i, s_j)$ — the metric upper-bounds the value difference, so the agent explores states with higher TD error.
+- **Advantage over episodic methods**: Does not rely on count-based episodic terms — addresses scalability limitation of RIDE, NovelD, etc.
+- **Limitation (identified by EME 2024)**: Uses Wasserstein-2 ($W_2$) instead of $W_1$ for next-state distance, which breaks theoretical integrity when $P(s,a)$ or $\pi$ is stochastic (EME Proposition 1). Also uses shifted reward expectations, introducing a looser bound (EME Proposition 2).
+
+**Kayal et al. (2025) Key Details — Extracted from Neural Computing & Applications 37:16269–16303**
+
+Source: `https://link.springer.com/article/10.1007/s00521-025-11340-0` (also arXiv:2501.11533)
+
+- **Full title**: The Impact of Intrinsic Rewards on Exploration in Reinforcement Learning
+- **Refined taxonomy of intrinsic rewards by diversity level**: Four levels — **State** (e.g., State Count), **State + Dynamics** (e.g., ICM), **Policy** (e.g., Maximum Entropy), **Skill** (e.g., DIAYN). More granular than the 3-family taxonomy in §2.2–2.3.
+- **Key findings**: (1) State Count leads to best exploration with low-dimensional observations; (2) with RGB observations, State Count degrades due to representation learning challenges, while Maximum Entropy remains robust; (3) DIAYN (skill diversity) does not promote exploration in MiniGrid because learning the skill space is challenging and skill-space exploration prioritizes behavioral differentiation over uniform state visitation.
+- **Relevance to this thesis**: The State + Dynamics level directly corresponds to the latent discrepancy $d_t$ in this work; the State level corresponds to count-based methods; the thesis's normalised EME scaling addresses the gap between State+Dynamics and Policy levels by adding reward-relevance weighting.
+
+**Zheng et al. (2024) CIM Key Details — Extracted from IJCAI 2024**
+
+Source: `https://arxiv.org/pdf/2407.09247` (also `https://doi.org/10.24963/ijcai.2024/620`, code: `https://github.com/x-zheng16/CIM`)
+
+- **Full title**: Constrained Intrinsic Motivation for Reinforcement Learning
+- **Two problems addressed**: (1) Reward-Free Pre-Training (RFPT) — designing effective intrinsic objectives for unsupervised skill discovery; (2) Exploration with Intrinsic Motivation (EIM) — reducing bias from intrinsic objectives when task rewards are present.
+- **CIM for EIM**: Leverages **constrained policy optimization to adaptively adjust the coefficient of the intrinsic objective** — a Lagrangian-based adaptive coefficient that mitigates distraction from intrinsic rewards when extrinsic rewards become available.
+- **Key connection to this thesis**: CIM for EIM addresses the same core problem as normalised EME scaling (Ch. 6) — how to adaptively scale intrinsic rewards so they don't overwhelm or collapse relative to extrinsic rewards. CIM uses constrained optimization (Lagrangian) while this thesis uses EMA-based normalisation of the ensemble variance. Both approaches are alternatives to the static $\beta$ coefficient used in Adventurer and RND.
+
 **Missing Information**:
 - None remaining for Background chapter — all key references have been fetched and key details extracted.
 
@@ -148,9 +181,9 @@ Source: `https://arxiv.org/pdf/1207.4114`
 | 3.3 Count-Based and Pseudo-Count Methods | Count-based bonuses (Bellemare et al. 2016); PixelCNN density models (Ostrovski et al. 2017); hashing-based counts; relationship to Bayesian information gain | How do pseudo-counts connect to epistemic uncertainty? |
 | 3.4 Uncertainty-Based Exploration | Ensemble disagreement (Pathak et al. 2019; Sekar et al. 2020); posterior sampling (Osband et al. 2016); Bayesian exploration bonuses; epistemic vs. aleatoric uncertainty decomposition | How does epistemic uncertainty drive exploration? |
 | 3.5 Memory-Based Exploration | Episodic memory (NGU, Badia et al. 2020a); Go-Explore (Ecoffet et al. 2021); Agent57 (Badia et al. 2020b); resettable premise; lifelong + episodic novelty combination | How does memory-based exploration overcome intrinsic reward vanishing? |
-| 3.6 Metric-Based Exploration | Bisimulation metric (Ferns et al. 2004; Zhang et al. 2020); latent-space state discrepancy; EME (Wang et al. 2024): robust metric + diversity-enhanced scaling factor; **references Theorems 1–2 and Definition 2 from Ch. 2 §2.6**; comparison with LIBERTY and RIDE on scalability, approximation gap, and episodic augmentation | What theoretical and practical gaps exist in current metric-based exploration, and how does EME address them? |
+| 3.6 Metric-Based Exploration | Bisimulation metric (Ferns et al. 2004; Zhang et al. 2020); **LIBERTY (Wang et al. 2023)**: inverse dynamic bisimulation metric as potential function, policy invariance, Theorems 1–2 (see Ch. 2 §2.6); EME (Wang et al. 2024): robust metric + diversity-enhanced scaling factor, **addresses LIBERTY's W₂ relaxation (Proposition 1) and shifted distance (Proposition 2)**; **references Theorems 1–2 and Definition 2 from Ch. 2 §2.6**; comparison with LIBERTY and RIDE on scalability, approximation gap, and episodic augmentation | What theoretical and practical gaps exist in current metric-based exploration, and how does EME address LIBERTY's limitations? |
 | 3.7 Information-Theoretic Exploration | Variational information maximisation (Houthooft et al. 2017): maximise mutual information between actions and state transitions; empowerment (Klyubin et al. 2005; Mohamed & Rezande 2015); compression-based curiosity (Kumar et al. 2021); E3 / R-MAX: information-theoretic model-based exploration; relationship to Bayesian exploration bonuses | How does information-theoretic exploration differ from prediction-based and metric-based approaches, and what computational challenges does it face? |
-| 3.8 Positioning of This Work | How the proposed method relates to and extends prior work: Adventurer (base) → latent discrepancy (replaces reconstruction) → EME scaling (adds reward sensitivity) → normalised EME (fixes sparse-reward collapse); brief justification for MDPO as policy optimizer (§2.1.3) | Where does this work sit in the exploration landscape, and what gap does it fill? |
+| 3.8 Positioning of This Work | How the proposed method relates to and extends prior work: Adventurer (base) → latent discrepancy (replaces reconstruction) → EME scaling (adds reward sensitivity) → normalised EME (fixes sparse-reward collapse); brief justification for MDPO as policy optimizer (§2.1.3); **comparison with alternative adaptive intrinsic reward scaling**: CIM (Zheng et al. 2024) uses Lagrangian constrained optimization vs. this thesis's EMA-based normalisation (Ch. 6); **Kayal et al. (2025) diversity-level taxonomy** positions latent discrepancy as State+Dynamics level, with normalised EME scaling bridging toward Policy level | Where does this work sit in the exploration landscape, and what gap does it fill? How does its adaptive scaling compare to CIM's constrained optimization approach? |
 
 **Key Papers**:
 - Pathak et al. (2017) [ICM]; Burda et al. (2019) [RND]; Hong et al. (2019) [GAEX]
@@ -162,6 +195,7 @@ Source: `https://arxiv.org/pdf/1207.4114`
 - Ferns et al. (2004) [Bisimulation]; Zhang et al. (2020) [Bisimulation in DRL]
 - Houthooft et al. (2017) [VIME]; Mohamed & Rezende (2015) [Empowerment]
 - Stadie et al. (2015) [Intrinsic Curiosity]; Deng et al. (2020) [FICM]
+- Wang et al. (2023) [LIBERTY]; Kayal et al. (2025) [Intrinsic Reward Impact Survey]; Zheng et al. (2024) [CIM]
 
 **Missing Information**:
 - Zhang et al. (2020) should be consulted for the bisimulation-in-DRL extension referenced in §3.6 ( Ferns et al. 2004 already extracted, see Ch. 2 §2.6).
@@ -213,7 +247,7 @@ Source: `https://arxiv.org/pdf/1207.4114`
 | 6.5 Motivating Example: CartPole Collapse | Single-seed preliminary CartPole 512-step observation: raw $\zeta$ rises from 4.6e-5 to 7.5e-3; V3 scale is constant at 1.0; V4 scale varies (2.68 → 3.41 → 3.40 → 2.74); full statistical evaluation deferred to Ch. 7 | What does the preliminary data suggest about V3 vs. V4 behaviour? |
 | 6.6 Frozen Encoder for Stationary Metrics | `--freeze-encoder-after-updates N`; BiGAN encoder stops receiving gradients; generator and discriminator continue | Why freeze the encoder to stabilise the latent metric? |
 
-**Key Papers**: Wang et al. (2024) [EME — clamped scaling]; Liu & Liu (2025) [Adventurer — Eq. (5) normalization]
+**Key Papers**: Wang et al. (2024) [EME — clamped scaling]; Liu & Liu (2025) [Adventurer — Eq. (5) normalization]; Zheng et al. (2024) [CIM — alternative adaptive scaling via constrained optimization]; Kayal et al. (2025) [intrinsic reward diversity taxonomy]
 
 **Missing Information**:
 - A **formal proof** that $\zeta / \mathbb{E}[\zeta]$ is scale-free (i.e., invariant under rescaling of the reward) would strengthen Section 6.2. The codebase demonstrates this empirically but does not prove it.
@@ -322,6 +356,9 @@ Source: `https://arxiv.org/pdf/1207.4114`
 | Intrinsic Curiosity for Exploration in High-Dim Deep RL | Stadie et al. (2015), ICLR 2016 | 3 |
 | Flow-based Intrinsic Curiosity Module | Deng et al. (2020) | 3 |
 | Compression-based Curiosity | Kumar et al. (2021) | 3 |
+| LIBERTY: Inverse Dynamic Bisimulation Metric | Wang et al. (2023), NeurIPS 2023 | 2, 3, 5 |
+| Impact of Intrinsic Rewards on Exploration | Kayal et al. (2025), Neural Comput & Applic 37 | 2, 3, 6 |
+| Constrained Intrinsic Motivation (CIM) | Zheng et al. (2024), IJCAI 2024 | 2, 3, 6 |
 
 ---
 
