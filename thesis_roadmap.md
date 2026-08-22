@@ -103,9 +103,32 @@ This thesis addresses the problem of efficient exploration in deep reinforcement
 - Sekar et al. (2020) [Plan2Explore]; Osband et al. (2016) [Bootstrapped DQN]
 - Ferns et al. (2004) [Bisimulation]; Zhang et al. (2020) [Bisimulation in DRL]
 
+**EME Paper Theoretical Details (Wang et al., 2024) — Extracted from NeurIPS 2024 paper**:
+
+Source: `https://proceedings.neurips.cc/paper_files/paper/2024/file/6a39cf3b666f8bdb2223f253981f3869-Paper-Conference.pdf` (also OpenReview: `QpKWFLtZKi`)
+
+- **EME Metric (Definition 2, Eq. 4)**: $d_E(s_i, s_j) = |\mathbb{E}_{a_i \sim \pi} r_{s_i}^{a_i} - \mathbb{E}_{a_j \sim \pi} r_{s_j}^{a_j}| + \gamma \mathbb{E}_{a_i \sim \pi} d_E(s_i', s_j') + \gamma D_{\mathrm{KL}}(\pi(\cdot|s_i) \| \pi(\cdot|s_j))$. Eliminates Wasserstein distance (replaced by representation-learning-based next-state distance) and adds KL divergence between policy distributions to address the Noisy-TV problem.
+
+- **Theorem 1**: The EME distance function $\mathcal{F}(d_E, \pi)$ has a unique fixed point $\hat{d}_E$ (convergence guarantee).
+
+- **Theorem 2 (Guaranteed Value Difference Bound)**: $|V^\pi(s_i) - V^\pi(s_j)| \leq d_E(s_i, s_j)$. The EME metric upper-bounds the value difference; large metric distance → large TD error → agent prioritizes transitions with large value differences.
+
+- **Proposition 1 (Relaxation Divergence)**: Replacing $W_1$ with $W_2$ in LIBERTY's bisimulation metric breaks theoretical integrity when $P(s,a)$ or $\pi$ is stochastic.
+
+- **Proposition 2 (Shifted LIBERTY Distance)**: Relaxing reward expectations introduces a looser value difference bound.
+
+- **Proposition 3**: Exact reward difference via ensemble: $|\mathbb{E}_{a_i \sim \pi} r_{s_i}^{a_i} - \mathbb{E}_{a_j \sim \pi} r_{s_j}^{a_j}| = \sqrt{\mathbb{E}_{a_i \sim \pi}[|r_{s_i}^{a_i} - r_{s_j}^{a_j}|^2] - \mathrm{var}(r_{s_i}) - \mathrm{var}(r_{s_j})}$.
+
+- **Ensemble Reward Variance (Eq. 8)**: $\zeta(r_{s_i}^{a_i}) = \mathbb{E}_{a_i \sim \pi, (s_i,a_i) \sim \mathcal{D}_\tau}\{\mathbb{E}_\eta[\|g(s_i,a_i,\eta) - \mathbb{E}_\eta[g(s_i,a_i,\eta)]\|_2^2]\}$.
+
+- **Diversity-Enhanced Scaling Factor (Eq. 10)**: $b_{t+1} = d_E(s_t, s_{t+1}) * \min\{\max\{\zeta(r_{s_t}), 1\}, M\}$. Variance is high in novel/unexplored regions (all models have high prediction error) and low in well-explored regions (all models agree).
+
+- **Tractable EME Loss (Eq. 9)**: Combines metric encoder $d_E^\phi$ with reward variance $\zeta$, next-state distance, and policy KL divergence — no approximation gap.
+
+- **Method Comparison Table (Table 1)**: RIDE (L₂ + episodic count, ✓episodic, ✓approx gap, ✗scalable), NovelD (L₁ + RND + episodic count, same), LIBERTY (bisimulation + λ, ✗episodic, ✓approx gap, ✗scalable), EME (d_E + ζ clamping, ✗episodic, ✗approx gap, ✓scalable).
+
 **Missing Information**:
 - Ferns et al. (2004) and Zhang et al. (2020) should be consulted for the formal bisimulation metric definition used in EME's theoretical analysis.
-- The full EME paper (Wang et al., 2024) should be consulted for its theoretical derivation of the bisimulation metric approximation and the formal derivation of the diversity-enhanced scaling factor.
 
 ---
 
@@ -251,7 +274,7 @@ This thesis addresses the problem of efficient exploration in deep reinforcement
 
 | Item | Chapter(s) | Status | Action Required |
 |------|-----------|--------|-----------------|
-| Full EME paper (Wang et al., 2024) — theoretical derivation of bisimulation metric approximation and diversity-enhanced scaling factor | 2, 3, 5, 6 | ⚠️ Not in repo | Download and cite the NeurIPS 2024 paper from OpenReview |
+| Full EME paper (Wang et al., 2024) — theoretical derivation of bisimulation metric approximation and diversity-enhanced scaling factor | 2, 3, 5, 6 | ✅ Verified (OpenReview QpKWFLtZKi) | Theorems 1–2, Propositions 1–3, EME Metric Def. 2 Eq.4, Ensemble variance Eq.8, Diversity-enhanced scaling Eq.10, Tractable loss Eq.9, Method comparison Table 1 all extracted and recorded in Ch. 3 section above |
 | Full MDPO paper (Tomar et al., 2022) — precise mathematical derivation and TRPO/PPO connections | 2, 3 | ⚠️ Not in repo | Download and cite the ICLR 2022 paper from OpenReview |
 | Exploration survey papers (Yang et al. 2021; Ladosz et al. 2022) — systematic comparison tables and benchmark results | 2, 3 | ⚠️ Not in repo | Download from arXiv |
 | Formal proof that latent discrepancy $\|E(s_t) - E(s_{t+1})\|_p$ is a valid metric on state space | 5, 8 | ❌ Not available | Derive from BiGAN encoder invertibility (Donahue et al., 2017, Theorem 3) or cite EME's theoretical framework |
