@@ -43,19 +43,20 @@ This thesis addresses the problem of efficient exploration in deep reinforcement
 
 ### Chapter 2: Background
 
+> **Chapter 2 vs. Chapter 3 boundary**: Chapter 2 **defines and formalises** concepts, taxonomies, and method categories. Chapter 3 **compares, evaluates, and positions** specific methods within those categories and against this work. No systematic benchmark comparisons appear in Chapter 2; those are deferred to Chapter 3.
+
 | Section | Purpose | Research Questions |
 |---------|---------|-------------------|
 | **2.1 Reinforcement Learning** | | |
 | 2.1.1 Reinforcement Learning | Introduction to RL: agent–environment interaction, reward, episodes, the exploitation–exploration dilemma | Why and when do we use RL? What makes RL different from supervised/unsupervised learning? |
 | 2.1.2 Markov Decision Processes and Policy Optimization | Formal MDP framework: states, actions, transitions, rewards, discount; value functions $V^\pi$, $Q^\pi$; policy gradient theorem | — |
 | 2.1.3 Mirror Descent Policy Optimization (MDPO) | MD: first-order method in constrained convex optimization; trust-region policy update $\max_\pi \mathbb{E}_{s \sim \rho_{\pi_k}}[\mathbb{E}_{a \sim \pi_k}[A^{\pi_k}(s,a) \frac{\pi(a|s)}{\pi_k(a|s)}] - \frac{1}{t_k} D_\mathrm{KL}(\pi \| \pi_k)]$; on-policy and off-policy variants; multiple gradient steps vs. exact solve | How does MDPO balance stable policy updates with exploration? What is the relationship between MDPO, PPO, and TRPO? |
-| **2.2 Exploration Methods** | | |
-| 2.2.1 Exploration Methods and Comparison | Taxonomy of exploration strategies: uncertainty-oriented (UCB, posterior sampling, ensemble disagreement), intrinsic motivation-oriented (count-based, prediction-based, memory-based), and other notable approaches; systematic comparison across benchmarks; survey integration from Yang et al. (2021) and Ladosz et al. (2022) | What is the best way to compare between exploration methods and why? Where does each method excel or fail? |
-| 2.3 Generative Adversarial Networks and BiGANs | Standard GANs, BiGAN joint adversarial game, encoder–generator inversion property (Theorem 3, Donahue et al. 2017) | Why does BiGAN learn an invertible mapping, and how does the encoder define a latent metric? |
-| 2.4 Intrinsic Reward and Exploration Bonuses | Taxonomy: count-based, prediction-based, uncertainty-based, memory-based; formal definitions of each category | What are the failure modes of existing exploration methods in high-dimensional sparse-reward settings? |
-| 2.5 Novelty-Based Exploration Methods | RND, ICM, GAEX, VAE-based methods; their relationship to reconstruction error | How does reconstruction novelty relate to visitation counts? |
-| 2.6 Metric-Based Exploration and EME | Bisimulation metric, latent-space state discrepancy, EME's ensemble scaling factor | What are the limitations of current metric-based exploration bonuses, and how does EME address them? |
-| 2.7 Episodic Memory and the Resettable Premise | Top-K episodic memory, NGU-style episodic+lifelong novelty, Agent57 | How does the resettable premise prevent intrinsic reward vanishing? |
+| **2.2 The Exploration Problem** | Formal definition of the exploration challenge in RL; the exploitation–exploration dilemma as a bandit-theoretic problem; the intrinsic reward framework $r_t^{total} = r_t^{ext} + \beta r_t^{int}$; high-level taxonomy of exploration strategies (three families: uncertainty-oriented, intrinsic motivation-oriented, memory-based); overview of when each family is applicable | Why is exploration fundamentally hard in high-dimensional sparse-reward MDPs? What is the intrinsic reward framework, and how do the three families of exploration strategies differ in principle? |
+| 2.3 Generative Adversarial Networks and BiGANs | Standard GANs (min–max game, Nash equilibrium); BiGAN joint adversarial game (encoder–generator–discriminator); encoder–generator inversion property (Theorem 3, Donahue et al. 2017); how the BiGAN encoder induces a latent space metric on observations | Why does BiGAN learn an invertible mapping, and how does the encoder define a latent metric? |
+| 2.4 Intrinsic Reward and Exploration Bonuses | Formal definition of bonus-augmented reward; categories of intrinsic bonuses (count-based, prediction-based, uncertainty-based, memory-based) with formal definitions of each; design principles for effective bonuses (information gain, reward relevance, scalability) | What are the formal requirements for an exploration bonus, and what are the failure modes of each category in high-dimensional sparse-reward settings? |
+| 2.5 Novelty-Based Exploration Methods | Formal definitions and formulations of RND, ICM, GAEX, VAE-based methods; their mathematical relationship to reconstruction error and visitation counts (without benchmark comparisons, which are deferred to Ch. 3) | How does reconstruction novelty formally relate to visitation counts? |
+| 2.6 Metric-Based Exploration and EME | Bisimulation metric definition (Ferns et al. 2004); latent-space state discrepancy; EME metric definition (Wang et al. 2024, Definition 2, Eq. 4); EME ensemble scaling factor (Eq. 10); value-difference bound (Theorem 2) | What are the formal properties of metric-based exploration bonuses, and how does EME's formulation guarantee a value-difference bound? |
+| 2.7 Episodic Memory and the Resettable Premise | Top-K episodic memory; NGU-style episodic+lifelong novelty decomposition; Agent57; the resettable premise and how it prevents intrinsic reward vanishing | How does the resettable premise prevent intrinsic reward vanishing? |
 
 **Key Papers**:
 - Tomar et al. (2022) [MDPO — ICLR 2022]
@@ -74,18 +75,22 @@ This thesis addresses the problem of efficient exploration in deep reinforcement
 - Bellemare et al. (2016) [Unifying Count-Based]
 - Ostrovski et al. (2017) [Count-Based with PixelCNN]
 - Goodfellow et al. (2014) [GANs]
+- Ferns et al. (2004) [Bisimulation Metrics]
 
 **Missing Information**:
 - The full MDPO paper (Tomar et al., 2022, ICLR) should be consulted for the precise mathematical derivation of on-policy and off-policy MDPO variants and their theoretical connections to TRPO and PPO.
-- Yang et al. (2021) and Ladosz et al. (2022) surveys should be used as primary references for the systematic comparison in Section 2.2.1.
+- Yang et al. (2021) and Ladosz et al. (2022) surveys should be consulted for the taxonomy overview in Section 2.2 (definitions and categorisation only; systematic comparisons deferred to Ch. 3).
+- Ferns et al. (2004) should be consulted for the formal bisimulation metric definition referenced in Section 2.6.
 
 ---
 
 ### Chapter 3: Related Work
 
+> **Chapter 3's role**: Surveys, compares, and positions specific methods within the taxonomy defined in Chapter 2. Systematic benchmark comparisons, failure-mode analyses, and method tradeoffs appear here—not in Chapter 2.
+
 | Section | Purpose | Research Questions |
 |---------|---------|-------------------|
-| 3.1 Prediction-Based Exploration | Forward dynamics prediction (ICM, Stadie et al. 2015); random network distillation (RND, Burda et al. 2019); flow-based curiosity (FICM, Deng et al. 2020); strengths and failure modes (noisy TV problem) | How do prediction errors serve as novelty signals, and when do they fail? |
+| 3.1 Prediction-Based Exploration | Forward dynamics prediction (ICM, Stadie et al. 2015); random network distillation (RND, Burda et al. 2019); flow-based curiosity (FICM, Deng et al. 2020); strengths and failure modes (noisy TV problem); empirical comparison across benchmarks | How do prediction errors serve as novelty signals, and when do they fail? |
 | 3.2 Generative-Model-Based Exploration | GAEX (Hong et al. 2019): discriminator scores as intrinsic rewards; VAE-based novelty (Asperti et al. 2021): reconstruction error; Adventurer (Liu & Liu 2025): BiGAN combined pixel+feature novelty | How do generative models estimate state novelty, and what is Adventurer's specific contribution? |
 | 3.3 Count-Based and Pseudo-Count Methods | Count-based bonuses (Bellemare et al. 2016); PixelCNN density models (Ostrovski et al. 2017); hashing-based counts; relationship to Bayesian information gain | How do pseudo-counts connect to epistemic uncertainty? |
 | 3.4 Uncertainty-Based Exploration | Ensemble disagreement (Pathak et al. 2019; Sekar et al. 2020); posterior sampling (Osband et al. 2016); Bayesian exploration bonuses; epistemic vs. aleatoric uncertainty decomposition | How does epistemic uncertainty drive exploration? |
