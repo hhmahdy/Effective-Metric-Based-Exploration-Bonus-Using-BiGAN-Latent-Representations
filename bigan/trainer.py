@@ -85,6 +85,7 @@ class BiGANTrainer:
         self.observation_shape = observation_shape
         self.device = torch.device(device)
         self.update_count = 0
+        self.encoder_frozen = False
 
         betas = (config.adam_beta1, config.adam_beta2)
         self.discriminator_optimizer = torch.optim.Adam(
@@ -136,6 +137,37 @@ class BiGANTrainer:
         """
         for parameter in module.parameters():
             parameter.requires_grad_(enabled)
+
+    def freeze_encoder(self) -> None:
+        """Stop optimizing the encoder while continuing adversarial training.
+
+        Input: This trainer.
+        Output: No value; encoder parameters stop receiving gradients and the
+            encoder optimizer step is skipped from now on.
+        Mathematical meaning: Fixes ``E_psi`` after pretraining so that any
+            downstream latent metric, such as the Contribution 2 exploration
+            bonus ``||E(s_t)-E(s_{t+1})||_p``, is measured in a stationary
+            space instead of one that drifts with the adversarial game.
+        """
+        if self.encoder_frozen:
+            return
+        self._set_requires_grad(self.encoder, False)
+        self.encoder.eval()
+        self.encoder_frozen = True
+
+    def unfreeze_encoder(self) -> None:
+        """Resume encoder optimization after a freeze.
+
+        Input: This trainer.
+        Output: No value; encoder parameters receive gradients again.
+        Mathematical meaning: Restores joint optimization of ``E_psi`` in the
+            bidirectional adversarial objective.
+        """
+        if not self.encoder_frozen:
+            return
+        self._set_requires_grad(self.encoder, True)
+        self.encoder.train()
+        self.encoder_frozen = False
 
     def _sample_latents(self, batch_size: int) -> Tensor:
         """Sample standard-normal latent vectors for generated joint pairs.
@@ -197,7 +229,8 @@ class BiGANTrainer:
             self.generator_optimizer.zero_grad(set_to_none=True)
             # Eq. (3): only the BiGAN adversarial objective is optimized.
             adversarial.backward()
-            self.encoder_optimizer.step()
+            if not self.encoder_frozen:
+                self.encoder_optimizer.step()
             self.generator_optimizer.step()
             with torch.no_grad():
                 diagnostic_latents = self.encoder(observations)

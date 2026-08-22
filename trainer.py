@@ -28,8 +28,9 @@ from bigan.generator import BiGANGenerator
 from bigan.trainer import BiGANTrainer, BiGANUpdateMetrics
 from config import ExperimentConfig
 from environments.vector_adapter import VectorEnvironmentAdapter
+from exploration.ensemble_scaling import EnsembleRewardVariance, EnsembleUpdateMetrics
 from exploration.episodic_memory import EpisodicMemory
-from exploration.intrinsic_reward import IntrinsicRewardPipeline
+from exploration.intrinsic_reward import IntrinsicRewardPipeline, MetricIntrinsicReward
 from exploration.novelty import NoveltyEstimator
 from exploration.transition_novelty import (
     LatentForwardModel,
@@ -42,6 +43,18 @@ from utils.replay import ReplayBuffer
 from utils.transition_replay import TransitionReplayBuffer
 from utils.seed import create_torch_generator, derive_seed, seed_everything
 from utils.visualization import TrainingPlotter
+
+
+@dataclass(frozen=True)
+class MetricEMEMetrics:
+    """Diagnostics of the BiGAN-latent, EME-scaled exploration bonus."""
+
+    latent_distance: float
+    ensemble_variance: float
+    bonus_scale: float
+    bonus: float
+    encoder_frozen: bool
+    ensemble: Optional[EnsembleUpdateMetrics] = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +72,7 @@ class TrainingIterationMetrics:
     ppo: PPOUpdateMetrics
     bigan: BiGANUpdateMetrics
     transition: Optional[TransitionUpdateMetrics] = None
+    metric_eme: Optional[MetricEMEMetrics] = None
 
 
 class AdventurerTrainer:
@@ -199,6 +213,11 @@ class AdventurerTrainer:
                 torch.float32,
                 torch.long if config.environment.discrete_actions else torch.float32,
             )
+        self.metric_eme_config = config.metric_eme
+        self.metric_reward: Optional[MetricIntrinsicReward] = None
+        self.reward_ensemble: Optional[EnsembleRewardVariance] = None
+        if config.metric_eme.enabled:
+            self._build_metric_exploration_bonus(observation_shape)
         self.reward_pipeline = IntrinsicRewardPipeline(config.novelty.clip_intrinsic_reward)
         self.rollout_buffer = RolloutBuffer(
             config.ppo.rollout_steps,
@@ -219,6 +238,85 @@ class AdventurerTrainer:
         self.episode_returns = torch.zeros(self.num_envs, dtype=torch.float64)
         self.episode_lengths = torch.zeros(self.num_envs, dtype=torch.long)
         self.environment_steps = 0
+
+    def _build_metric_exploration_bonus(self, observation_shape: tuple) -> None:
+        """Create the latent-discrepancy bonus and its EME reward ensemble.
+
+        Input: Observation shape of the environment.
+        Output: No value; ``self.metric_reward`` and, when EME scaling is on,
+            ``self.reward_ensemble`` are constructed.
+        Mathematical meaning: Instantiates
+            ``b_t=||E(s_t)-E(s_{t+1})||_p * min(max(zeta(r),1),M)`` by pairing
+            the BiGAN encoder metric with an ensemble estimate of the epistemic
+            reward variance ``zeta(r)``.
+        """
+        settings = self.config.metric_eme
+        if settings.ensemble_scaling:
+            if settings.ensemble_input == "latent":
+                input_dim = self.config.bigan.latent_dim
+                feature_extractor = self.encoder
+            else:
+                input_dim = 1
+                for dimension in observation_shape:
+                    input_dim *= int(dimension)
+                feature_extractor = None
+            self.reward_ensemble = EnsembleRewardVariance(
+                input_dim=input_dim,
+                ensemble_size=settings.ensemble_size,
+                hidden_dim=settings.ensemble_hidden_dim,
+                learning_rate=settings.ensemble_learning_rate,
+                buffer_capacity=settings.ensemble_buffer_capacity,
+                batch_size=settings.ensemble_batch_size,
+                min_buffer_size=settings.ensemble_min_buffer_size,
+                bootstrap_probability=settings.ensemble_bootstrap_probability,
+                max_grad_norm=settings.ensemble_max_grad_norm,
+                feature_extractor=feature_extractor,
+                device=self.device,
+                generator=create_torch_generator(
+                    derive_seed(self.config.seed.seed, 0xE3E), device=self.device
+                ),
+            )
+        self.metric_reward = MetricIntrinsicReward(
+            encoder=self.encoder,
+            ensemble=self.reward_ensemble,
+            max_reward_scaling=settings.max_reward_scaling,
+            min_reward_scaling=settings.min_reward_scaling,
+            norm=settings.latent_norm,
+            normalize=settings.normalize_bonus,
+            normalization_epsilon=self.config.novelty.normalization_epsilon,
+            normalization_clip=settings.bonus_normalization_clip,
+            clip_value=self.config.novelty.clip_intrinsic_reward,
+            device=self.device,
+        )
+        if settings.freeze_encoder_after_updates == 0:
+            self._freeze_encoder()
+
+    def _freeze_encoder(self) -> None:
+        """Freeze the BiGAN encoder so the latent metric stops drifting.
+
+        Input: This trainer.
+        Output: No value; the BiGAN trainer stops stepping the encoder.
+        Mathematical meaning: Holds ``E_psi`` fixed so that the exploration
+            bonus compares latent codes across time in one stationary space.
+        """
+        self.bigan.freeze_encoder()
+        if self.metric_reward is not None:
+            self.metric_reward.discrepancy.freeze()
+
+    def _maybe_freeze_encoder(self, update_index: int) -> None:
+        """Freeze the encoder once the configured pretraining budget elapses.
+
+        Input: Zero-based index of the PPO update about to be executed.
+        Output: No value; freezing happens at most once.
+        Mathematical meaning: Separates a BiGAN pretraining phase, in which the
+            metric is still learned, from an exploitation phase in which the
+            metric is fixed.
+        """
+        threshold = self.config.metric_eme.freeze_encoder_after_updates
+        if threshold is None or self.bigan.encoder_frozen:
+            return
+        if update_index >= threshold:
+            self._freeze_encoder()
 
     @staticmethod
     def _resolve_device(device_name: str) -> torch.device:
@@ -315,6 +413,10 @@ class AdventurerTrainer:
             "pixel": 0.0,
             "feature": 0.0,
             "normalized": 0.0,
+            "latent_distance": 0.0,
+            "ensemble_variance": 0.0,
+            "bonus_scale": 0.0,
+            "bonus": 0.0,
         }
         for _ in range(self.config.ppo.rollout_steps):
             observations = self._reset_if_needed()
@@ -322,7 +424,23 @@ class AdventurerTrainer:
             transition = self.environment.step(actions)
             next_observations = transition.observations.to(self.device)
             extrinsic_rewards = transition.rewards.to(self.device)
-            if self.config.novelty.novelty_type == "state":
+            if self.config.metric_eme.enabled:
+                # Contribution 2: the reconstruction novelty B(s) is replaced by
+                # b_t = ||E(s_t)-E(s_{t+1})||_p * min(max(zeta(r),1),M).
+                assert self.metric_reward is not None
+                novelty = self.metric_reward(
+                    observations,
+                    next_observations,
+                    extrinsic_reward=extrinsic_rewards,
+                    update_statistics=True,
+                )
+                if self.reward_ensemble is not None:
+                    self.reward_ensemble.add(next_observations, extrinsic_rewards)
+                sums["latent_distance"] += float(novelty.latent_distance.detach().sum().cpu())
+                sums["ensemble_variance"] += float(novelty.ensemble_variance.detach().sum().cpu())
+                sums["bonus_scale"] += float(novelty.bonus_scale.detach().sum().cpu())
+                sums["bonus"] += float(novelty.combined_score.detach().sum().cpu())
+            elif self.config.novelty.novelty_type == "state":
                 assert self.novelty is not None
                 novelty = self.novelty(
                     next_observations,
@@ -379,6 +497,57 @@ class AdventurerTrainer:
         denominator = float(self.config.ppo.rollout_steps * self.num_envs)
         return {key: value / denominator for key, value in sums.items()}
 
+    def _update_metric_exploration_bonus(
+        self,
+        summary: Dict[str, float],
+    ) -> Optional[MetricEMEMetrics]:
+        """Fit the reward ensemble and summarize the bonus for one rollout.
+
+        Input: Rollout means produced by ``_collect_rollout``.
+        Output: ``MetricEMEMetrics`` when the metric bonus is enabled, else
+            ``None``.
+        Mathematical meaning: Performs stochastic gradient steps on the ``K``
+            reward regressors so ``zeta(r)`` contracts where reward structure
+            has been learned, and reports the mean latent distance, variance,
+            clamped scale, and bonus over the ``T*N`` collected transitions.
+        """
+        if not self.config.metric_eme.enabled:
+            return None
+        ensemble_metrics: Optional[EnsembleUpdateMetrics] = None
+        if self.reward_ensemble is not None:
+            for _ in range(self.config.metric_eme.ensemble_updates_per_rollout):
+                ensemble_metrics = self.reward_ensemble.update()
+        return MetricEMEMetrics(
+            latent_distance=summary["latent_distance"],
+            ensemble_variance=summary["ensemble_variance"],
+            bonus_scale=summary["bonus_scale"],
+            bonus=summary["bonus"],
+            encoder_frozen=bool(self.bigan.encoder_frozen),
+            ensemble=ensemble_metrics,
+        )
+
+    @staticmethod
+    def _metric_eme_log_entries(metrics: Optional[MetricEMEMetrics]) -> Dict[str, object]:
+        """Return the loggable scalars of the metric exploration bonus.
+
+        Input: Optional metric-bonus diagnostics for one update.
+        Output: Mapping of log tags to values; empty when the bonus is off.
+        Mathematical meaning: Exposes ``||E(s_t)-E(s_{t+1})||_p``, ``zeta(r)``,
+            the clamped scale, and their product ``b_t`` averaged over the
+            rollout, so variants can be compared against Adventurer's pixel and
+            feature novelty terms.
+        """
+        if metrics is None:
+            return {}
+        return {
+            "intrinsic/latent_distance": metrics.latent_distance,
+            "intrinsic/ensemble_variance": metrics.ensemble_variance,
+            "intrinsic/bonus_scale": metrics.bonus_scale,
+            "intrinsic/bonus": metrics.bonus,
+            "intrinsic/encoder_frozen": float(metrics.encoder_frozen),
+            "ensemble": metrics.ensemble,
+        }
+
     def train(self) -> List[TrainingIterationMetrics]:
         """Run vectorized collection, two-stream GAE, PPO, and BiGAN updates.
 
@@ -391,6 +560,7 @@ class AdventurerTrainer:
         samples_per_update = self.config.ppo.rollout_steps * self.num_envs
         total_updates = self.config.training.total_environment_steps // samples_per_update
         for update_index in range(total_updates):
+            self._maybe_freeze_encoder(update_index)
             summary = self._collect_rollout()
             tensors = self.rollout_buffer.tensors()
             extrinsic_last_value, intrinsic_last_value = self.critic(
@@ -423,6 +593,7 @@ class AdventurerTrainer:
                 )
             else:
                 transition_metrics = None
+            metric_eme_metrics = self._update_metric_exploration_bonus(summary)
             metrics = TrainingIterationMetrics(
                 update_index,
                 self.environment_steps,
@@ -434,6 +605,8 @@ class AdventurerTrainer:
                 summary["normalized"],
                 ppo_metrics,
                 bigan_metrics,
+                transition_metrics,
+                metric_eme_metrics,
             )
             results.append(metrics)
             if self.logger is not None:
@@ -450,6 +623,7 @@ class AdventurerTrainer:
                         "ppo": metrics.ppo,
                         "bigan": metrics.bigan,
                         "transition": metrics.transition,
+                        **self._metric_eme_log_entries(metrics.metric_eme),
                     },
                 )
             if self.plotter is not None:

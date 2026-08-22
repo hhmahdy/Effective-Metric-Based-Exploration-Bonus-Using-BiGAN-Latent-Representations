@@ -205,6 +205,10 @@ Adventurer/
 │   └── trainer.py
 ├── exploration/
 │   ├── novelty.py
+│   ├── transition_novelty.py
+│   ├── state_discrepancy.py
+│   ├── ensemble_scaling.py
+│   ├── episodic_memory.py
 │   └── intrinsic_reward.py
 ├── utils/
 │   ├── logger.py
@@ -214,7 +218,7 @@ Adventurer/
 ├── environments/
 │   └── adapter.py
 └── tests/
-    └── test_advantage.py
+    └── test_metric_eme.py
 ```
 
 ## Installation
@@ -580,6 +584,105 @@ runs/solaris-comparison/game_score_comparison.png
 The CSV contains raw and rolling game scores for both variants. The PNG uses
 identical axes and a 300 DPI publication-style figure.
 
+## Metric-Based Exploration Bonus (BiGAN Latent + EME Scaling)
+
+Adventurer scores a single state by how badly the BiGAN reconstructs it. This
+contribution replaces that reconstruction-error novelty with a *metric* bonus
+computed directly in the encoder's latent space and scaled by the epistemic
+disagreement of an ensemble of reward models, as in EME:
+
+\[
+b_t=\underbrace{\left\|E_\psi(s_t)-E_\psi(s_{t+1})\right\|_p}_{\text{latent state discrepancy}}
+\cdot
+\underbrace{\min\!\big(\max(\zeta(r),1),\,M\big)}_{\text{diversity-enhanced scaling}},
+\qquad
+\zeta(r)=\operatorname{Var}\big(\hat r_1(s_{t+1}),\dots,\hat r_K(s_{t+1})\big).
+\]
+
+The bonus needs no generator or discriminator pass: one extra encoder forward
+per environment step replaces the reconstruction pipeline. The generator and
+discriminator remain in the run because the BiGAN adversarial objective still
+trains the encoder that defines the metric.
+
+### Modules
+
+| File | Responsibility |
+|------|----------------|
+| `exploration/state_discrepancy.py` | `LatentStateDiscrepancy`: `d_t = ||E(s_t)-E(s_{t+1})||_p`, `p in {1,2}`, plus encoder freezing. |
+| `exploration/ensemble_scaling.py` | `RewardNet`, `FeatureRewardBuffer`, and `EnsembleRewardVariance`: `K` bootstrapped reward regressors and their prediction variance `zeta(r)`. |
+| `exploration/intrinsic_reward.py` | `MetricIntrinsicReward`: assembles `b_t`, clamps `zeta` to `[1, M]`, and optionally applies Eq. (5) reward-scale normalization. |
+| `config.py` | `MetricEMEConfig`: `enabled`, `ensemble_scaling`, `ensemble_size` (K), `max_reward_scaling` (M), `latent_norm`, and ensemble/optimization settings. |
+| `trainer.py` | Stores `(s_t, s_{t+1})` pairs during `collect_rollouts`, computes `b_t` instead of `NoveltyEstimator` novelty when `metric_eme.enabled`, and trains the ensemble once per PPO update. |
+
+`MetricIntrinsicReward` returns a `MetricNoveltyComponents` object rather than a
+bare tensor so the trainer, episodic memory, and logger can consume it exactly
+like `NoveltyComponents`; its `normalized_score` field is the intrinsic reward
+handed to PPO, and `pixel_error` / `feature_error` are compatibility aliases for
+the latent distance and the clamped scale.
+
+### Design notes
+
+- **Ensemble inputs.** Members are MLPs. With `ensemble_input=latent` (default)
+  they consume `E(s)`, so the cost is independent of the frame resolution;
+  `ensemble_input=observation` flattens raw observations instead.
+- **Bootstrap diversity.** Each member owns an independent buffer filled with an
+  independently masked subset of the collected data
+  (`ensemble_bootstrap_probability`, default `0.5`). Sharing one data set makes
+  the members converge and collapses `zeta(r)` to zero.
+- **Clamping.** `min(max(zeta,1),M)` means the bonus is never smaller than the
+  pure metric distance and never inflated by more than `M`; early in training
+  `zeta` is typically far below one, so V3 initially behaves like V2.
+- **Normalization.** The raw `b_t` is passed through Adventurer's Eq. (5)
+  running normalization by default so the intrinsic stream stays on the
+  extrinsic-reward scale and `beta` keeps the same meaning across variants.
+  Latent distances are much more concentrated than reconstruction errors, so the
+  normalized bonus is bounded by `--bonus-normalization-clip` (default `5.0`);
+  pass `--disable-bonus-normalization` to feed the raw `b_t` to PPO.
+- **Frozen metric.** `--freeze-encoder-after-updates N` stops the BiGAN encoder
+  optimizer after `N` PPO updates (`0` freezes before the first rollout), so the
+  latent metric, and therefore the scale of `d_t`, becomes stationary. The
+  generator and discriminator keep training.
+
+### Experiment variants
+
+| Variant | Command |
+|---------|---------|
+| **V1 (Baseline)** Adventurer original | `python main.py --env ALE/MontezumaRevenge-v5 --novelty bigan` |
+| **V2** Latent discrepancy only | `python main.py --env ALE/MontezumaRevenge-v5 --novelty latent_discrepancy` |
+| **V3 (Ours)** Latent + EME scaling | `python main.py --env ALE/MontezumaRevenge-v5 --novelty latent_discrepancy --eme True --ensemble_K 5` |
+
+`--env` is an alias of `--environment-id`, and `--novelty` is an alias layer over
+`--novelty-type`: `bigan` and `state` select Adventurer novelty, `transition`
+selects the latent forward-model variant, and `latent_discrepancy` enables the
+metric bonus. `--eme True` additionally turns on the ensemble scaling factor, so
+V2 is the `zeta == 1` ablation of V3. Combining `--novelty transition` with
+`--eme True` is rejected by configuration validation because the metric bonus
+replaces, rather than augments, the novelty term.
+
+All three variants can be run over several seeds, with comparison figures, via:
+
+```bash
+ENVIRONMENT_ID=ALE/MontezumaRevenge-v5 SEEDS="0 1 2" ./run_metric_eme_comparison.sh
+```
+
+### Logged metrics
+
+| Tag | Meaning |
+|-----|---------|
+| `intrinsic/latent_distance` | mean `||E(s_t)-E(s_{t+1})||_p` |
+| `intrinsic/ensemble_variance` | mean raw `zeta(r)` before clamping |
+| `intrinsic/bonus_scale` | mean `min(max(zeta,1),M)` |
+| `intrinsic/bonus` | mean raw bonus `b_t` |
+| `intrinsic/encoder_frozen` | `1.0` once the encoder metric is frozen |
+| `ensemble/mean_loss`, `ensemble/buffer_size` | reward-ensemble regression diagnostics |
+| `novelty/pixel`, `novelty/feature` | Adventurer's `L_G` and `L_D` in V1; the latent distance and bonus scale in V2/V3 |
+| `reward/intrinsic`, `reward/total` | reward streams, directly comparable across variants |
+
+Comparing Adventurer's `pixel_loss` and `feature_loss` against the discrepancy
+bonus therefore only requires reading `novelty/pixel`, `novelty/feature`,
+`intrinsic/latent_distance`, and `reward/intrinsic` from the same JSONL or
+TensorBoard stream of each run.
+
 ## Extending the Project
 
 ### Parallel environments
@@ -609,7 +712,10 @@ Useful ablations include:
 - BiGAN update frequency sweeps,
 - replay-capacity sweeps,
 - different latent dimensions,
-- different PPO clipping coefficients.
+- different PPO clipping coefficients,
+- `latent_norm` in `{L1, L2}` for the metric bonus,
+- `max_reward_scaling` (M) and `ensemble_size` (K) sweeps,
+- frozen vs. continually trained encoder metric.
 
 ## License and Citation
 

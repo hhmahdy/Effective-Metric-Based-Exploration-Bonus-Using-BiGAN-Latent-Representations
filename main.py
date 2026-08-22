@@ -11,13 +11,45 @@ import argparse
 from dataclasses import replace
 from pathlib import Path
 
-from config import DeviceType, EnvironmentConfig, ExperimentConfig, TrainingConfig
+from config import (
+    DeviceType,
+    EnvironmentConfig,
+    ExperimentConfig,
+    MetricEMEConfig,
+    TrainingConfig,
+)
 from environments.adapter import SingleEnvironmentAdapter, make_gymnasium_environment
 from environments.vector_adapter import VectorEnvironmentAdapter
 from trainer import AdventurerTrainer
 from evaluation.comparison import save_game_score_comparison
 from utils.seed import derive_seed
 from utils.logger import ExperimentLogger
+
+
+def _parse_boolean(value: str) -> bool:
+    """Parse a permissive command-line boolean.
+
+    Input: String such as ``True``, ``false``, ``1``, or ``no``.
+    Output: Corresponding Python boolean.
+    Mathematical meaning: None; selects a discrete experiment variant.
+    """
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "t", "yes", "y", "1"}:
+        return True
+    if normalized in {"false", "f", "no", "n", "0"}:
+        return False
+    raise argparse.ArgumentTypeError(f"expected a boolean value, got {value!r}")
+
+
+NOVELTY_ALIASES = {
+    # V1 baseline: Adventurer reconstruction novelty B(s).
+    "bigan": ("state", False),
+    "state": ("state", False),
+    # Adventurer transition novelty T(s,a,s').
+    "transition": ("transition", False),
+    # V2/V3: metric bonus ||E(s_t)-E(s_{t+1})||_p, optionally EME-scaled.
+    "latent_discrepancy": ("state", True),
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,7 +62,12 @@ def parse_args() -> argparse.Namespace:
         stochastic PPO/BiGAN optimization process.
     """
     parser = argparse.ArgumentParser(description="Train Adventurer with PPO and BiGAN exploration")
-    parser.add_argument("--environment-id", default="CartPole-v1")
+    parser.add_argument(
+        "--environment-id",
+        "--env",
+        dest="environment_id",
+        default="CartPole-v1",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-parallel-envs", type=int, default=96)
     parser.add_argument("--total-environment-steps", type=int, default=12_288_000)
@@ -57,6 +94,57 @@ def parse_args() -> argparse.Namespace:
         help="single beta applied to intrinsic advantage after independent GAE",
     )
     parser.add_argument("--novelty-type", choices=["state", "transition"], default="state")
+    parser.add_argument(
+        "--novelty",
+        choices=sorted(NOVELTY_ALIASES),
+        default=None,
+        help=(
+            "experiment variant: 'bigan' reproduces Adventurer novelty, "
+            "'latent_discrepancy' uses the BiGAN latent metric bonus, "
+            "'transition' uses latent forward-model novelty"
+        ),
+    )
+    parser.add_argument(
+        "--eme",
+        type=_parse_boolean,
+        nargs="?",
+        const=True,
+        default=None,
+        help="scale the latent bonus by the EME ensemble reward variance zeta(r)",
+    )
+    parser.add_argument("--ensemble_K", "--ensemble-size", dest="ensemble_size", type=int, default=5)
+    parser.add_argument(
+        "--max-reward-scaling",
+        dest="max_reward_scaling",
+        type=float,
+        default=5.0,
+        help="upper clamp M applied to zeta(r)",
+    )
+    parser.add_argument("--latent-norm", choices=["L1", "L2"], default="L2")
+    parser.add_argument("--ensemble-input", choices=["latent", "observation"], default="latent")
+    parser.add_argument("--ensemble-hidden-dim", type=int, default=256)
+    parser.add_argument("--ensemble-learning-rate", type=float, default=1.0e-3)
+    parser.add_argument("--ensemble-batch-size", type=int, default=64)
+    parser.add_argument("--ensemble-min-buffer-size", type=int, default=128)
+    parser.add_argument("--ensemble-bootstrap-probability", type=float, default=0.5)
+    parser.add_argument("--ensemble-updates-per-rollout", type=int, default=1)
+    parser.add_argument(
+        "--freeze-encoder-after-updates",
+        type=int,
+        default=None,
+        help="freeze the BiGAN encoder once this many PPO updates have started",
+    )
+    parser.add_argument(
+        "--bonus-normalization-clip",
+        type=float,
+        default=5.0,
+        help="symmetric bound on the Eq. (5)-normalized bonus",
+    )
+    parser.add_argument(
+        "--disable-bonus-normalization",
+        action="store_true",
+        help="feed the raw bonus b_t to PPO instead of Eq. (5) reward-scale normalization",
+    )
     parser.add_argument("--state-alpha", type=float, default=0.9)
     parser.add_argument("--transition-alpha", type=float, default=0.9)
     parser.add_argument("--compare-baseline-directory", type=Path, default=None)
@@ -158,11 +246,34 @@ def build_config(
         resettable=args.resettable,
         episodic_memory_size=args.episodic_memory_size,
     )
+    novelty_type, metric_enabled = NOVELTY_ALIASES.get(
+        args.novelty, (args.novelty_type, False)
+    )
     novelty_config = replace(
         base.novelty,
-        novelty_type=args.novelty_type,
+        novelty_type=novelty_type,
         alpha=args.state_alpha,
         transition_alpha=args.transition_alpha,
+    )
+    # V2 keeps the pure latent metric (zeta == 1); V3 adds EME variance scaling.
+    ensemble_scaling = bool(args.eme)
+    metric_eme_config = replace(
+        base.metric_eme,
+        enabled=metric_enabled or ensemble_scaling,
+        ensemble_scaling=ensemble_scaling,
+        ensemble_size=args.ensemble_size,
+        max_reward_scaling=args.max_reward_scaling,
+        latent_norm=args.latent_norm,
+        ensemble_input=args.ensemble_input,
+        ensemble_hidden_dim=args.ensemble_hidden_dim,
+        ensemble_learning_rate=args.ensemble_learning_rate,
+        ensemble_batch_size=args.ensemble_batch_size,
+        ensemble_min_buffer_size=args.ensemble_min_buffer_size,
+        ensemble_bootstrap_probability=args.ensemble_bootstrap_probability,
+        ensemble_updates_per_rollout=args.ensemble_updates_per_rollout,
+        normalize_bonus=not args.disable_bonus_normalization,
+        bonus_normalization_clip=args.bonus_normalization_clip,
+        freeze_encoder_after_updates=args.freeze_encoder_after_updates,
     )
     bigan_config = replace(base.bigan, batch_size=args.bigan_batch_size)
     seed_config = replace(base.seed, seed=args.seed)
@@ -173,6 +284,7 @@ def build_config(
         ppo=ppo_config,
         bigan=bigan_config,
         novelty=novelty_config,
+        metric_eme=metric_eme_config,
         training=training_config,
     )
 

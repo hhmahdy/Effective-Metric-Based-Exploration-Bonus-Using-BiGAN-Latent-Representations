@@ -267,6 +267,77 @@ class NoveltyConfig:
 
 
 @dataclass(frozen=True)
+class MetricEMEConfig:
+    """Contribution 2: BiGAN latent discrepancy + EME variance scaling.
+
+    The exploration bonus replaces Adventurer's reconstruction novelty with
+
+    ``b_t = ||E(s_t) - E(s_{t+1})||_p * min(max(Var(hat r_1..hat r_K), 1), M)``.
+
+    ``enabled`` switches the bonus on; ``ensemble_scaling`` switches the EME
+    factor ``zeta(r)`` on. Enabling only the former gives the latent-only
+    ablation in which the scaling factor is identically one.
+    """
+
+    enabled: bool = False
+    ensemble_scaling: bool = True
+    ensemble_size: int = 5                # K
+    max_reward_scaling: float = 5.0       # M
+    min_reward_scaling: float = 1.0       # lower clamp of zeta(r)
+    latent_norm: str = "L2"               # {L1, L2}
+    ensemble_hidden_dim: int = 256
+    ensemble_learning_rate: float = 1.0e-3
+    ensemble_batch_size: int = 64
+    ensemble_min_buffer_size: int = 128
+    ensemble_buffer_capacity: int = 100_000
+    ensemble_bootstrap_probability: float = 0.5
+    ensemble_max_grad_norm: float = 0.5
+    ensemble_updates_per_rollout: int = 1
+    ensemble_input: str = "latent"        # {latent, observation}
+    normalize_bonus: bool = True
+    bonus_normalization_clip: Optional[float] = 5.0
+    freeze_encoder_after_updates: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        """Validate the metric bonus and ensemble hyperparameters.
+
+        Input: Values supplied to this dataclass.
+        Output: No value; raises ``ValueError`` for invalid settings.
+        Mathematical meaning: Guarantees a well-defined metric ``||.||_p``, a
+            non-degenerate ensemble variance (``K>=2``), and a clamp interval
+            ``[min, M]`` that never inverts.
+        """
+        if self.latent_norm not in {"L1", "L2"}:
+            raise ValueError("latent_norm must be 'L1' or 'L2'")
+        if self.ensemble_input not in {"latent", "observation"}:
+            raise ValueError("ensemble_input must be 'latent' or 'observation'")
+        if self.ensemble_size < 2:
+            raise ValueError("ensemble_size must be at least two for a variance")
+        if self.min_reward_scaling <= 0.0 or self.max_reward_scaling <= 0.0:
+            raise ValueError("reward scaling bounds must be positive")
+        if self.max_reward_scaling < self.min_reward_scaling:
+            raise ValueError("max_reward_scaling must be at least min_reward_scaling")
+        if self.ensemble_hidden_dim <= 0 or self.ensemble_learning_rate <= 0.0:
+            raise ValueError("ensemble hidden dimension and learning rate must be positive")
+        if self.ensemble_batch_size <= 0 or self.ensemble_min_buffer_size <= 0:
+            raise ValueError("ensemble batch and minimum buffer sizes must be positive")
+        if self.ensemble_min_buffer_size < self.ensemble_batch_size:
+            raise ValueError("ensemble_min_buffer_size must be at least ensemble_batch_size")
+        if self.ensemble_buffer_capacity < self.ensemble_min_buffer_size:
+            raise ValueError("ensemble_buffer_capacity must hold at least min_buffer_size samples")
+        if not 0.0 < self.ensemble_bootstrap_probability <= 1.0:
+            raise ValueError("ensemble_bootstrap_probability must be in (0, 1]")
+        if self.ensemble_max_grad_norm <= 0.0:
+            raise ValueError("ensemble_max_grad_norm must be positive")
+        if self.ensemble_updates_per_rollout <= 0:
+            raise ValueError("ensemble_updates_per_rollout must be positive")
+        if self.bonus_normalization_clip is not None and self.bonus_normalization_clip <= 0.0:
+            raise ValueError("bonus_normalization_clip must be positive when provided")
+        if self.freeze_encoder_after_updates is not None and self.freeze_encoder_after_updates < 0:
+            raise ValueError("freeze_encoder_after_updates must be non-negative when provided")
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
     """Top-level schedule, logging, checkpoint, and device settings."""
 
@@ -322,6 +393,7 @@ class ExperimentConfig:
     ppo: PPOConfig = PPOConfig()
     bigan: BiGANConfig = BiGANConfig()
     novelty: NoveltyConfig = NoveltyConfig()
+    metric_eme: MetricEMEConfig = MetricEMEConfig()
     training: TrainingConfig = TrainingConfig()
 
     def __post_init__(self) -> None:
@@ -343,6 +415,11 @@ class ExperimentConfig:
             )
         if self.environment.discrete_actions and self.environment.action_dim <= 0:
             raise ValueError("discrete action spaces require a positive action_dim")
+        if self.metric_eme.enabled and self.novelty.novelty_type != "state":
+            raise ValueError(
+                "metric_eme replaces the state novelty bonus and cannot be combined "
+                "with novelty_type='transition'"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible nested representation of the configuration.
