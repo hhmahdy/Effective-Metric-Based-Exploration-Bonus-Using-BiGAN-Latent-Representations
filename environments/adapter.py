@@ -338,6 +338,11 @@ def make_gymnasium_environment(
     """
     try:
         import gymnasium as gym
+        if environment_id.startswith("CorridorTV") or environment_id == "CorridorTV-v0":
+            # Part-3 CorridorTV registration (single allowed import into existing
+            # plumbing); imports the module so gymnasium.make("CorridorTV-v0")
+            # resolves. No other behavior is changed.
+            import environments.corridortv  # noqa: F401
         if environment_id.startswith("ALE/"):
             import ale_py  # noqa: F401
         if environment_id.startswith(("Fetch", "Hand", "Adroit", "PointMaze", "AntMaze")):

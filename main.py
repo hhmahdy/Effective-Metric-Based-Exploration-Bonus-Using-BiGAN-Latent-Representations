@@ -21,6 +21,7 @@ from config import (
 from environments.adapter import SingleEnvironmentAdapter, make_gymnasium_environment
 from environments.vector_adapter import VectorEnvironmentAdapter
 from trainer import AdventurerTrainer
+from part3.trainer import Part3Trainer
 from evaluation.comparison import save_game_score_comparison
 from utils.seed import derive_seed
 from utils.logger import ExperimentLogger
@@ -70,7 +71,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-parallel-envs", type=int, default=96)
-    parser.add_argument("--total-environment-steps", type=int, default=12_288_000)
+    parser.add_argument(
+        "--total-environment-steps",
+        type=int,
+        default=None,
+        help=(
+            "total environment steps. Defaults to the Part-3 Stage-1 exact "
+            "budget (1,990,656 = 162 updates) when --part3 is set, otherwise to "
+            "the legacy default (12,288,000). The Stage-1 budget is 'approximately "
+            "2M steps; exact budget constrained by rollout divisibility' because "
+            "2,000,000 is not divisible by 96*128=12,288."
+        ),
+    )
     parser.add_argument("--rollout-steps", type=int, default=128)
     parser.add_argument("--minibatch-size", type=int, default=32)
     parser.add_argument("--output-directory", type=Path, default=Path("runs/adventurer"))
@@ -209,6 +221,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--episodic-memory-size", type=int, default=10)
     parser.add_argument("--bigan-batch-size", type=int, default=64)
+    parser.add_argument(
+        "--part3",
+        action="store_true",
+        help=(
+            "enable the Part-3 causal representation-intervention path "
+            "(pure L2 transition novelty with a single shared forward model)"
+        ),
+    )
+    parser.add_argument(
+        "--representation",
+        choices=["bigan", "idf", "rnd"],
+        default=None,
+        help="representation E under test in Part-3 mode: bigan, idf, or rnd",
+    )
     return parser.parse_args()
 
 
@@ -256,6 +282,20 @@ def build_config(
     """
     observation_shape, action_dim, discrete_actions = _space_dimensions(environment)
     base = ExperimentConfig()
+    part3_enabled = bool(args.part3)
+    if args.total_environment_steps is not None:
+        total_environment_steps = args.total_environment_steps
+    elif part3_enabled:
+        # Stage-1 exact budget: 96*128=12,288 per update; 2,000,000 is not
+        # divisible by 12,288, so use 1,990,656 = 162 updates.
+        total_environment_steps = base.part3.stage1_environment_steps
+    else:
+        total_environment_steps = 12_288_000
+    part3_config = replace(
+        base.part3,
+        enabled=part3_enabled,
+        representation=args.representation or base.part3.representation,
+    )
     environment_config = replace(
         base.environment,
         observation_shape=observation_shape,
@@ -281,7 +321,7 @@ def build_config(
     )
     training_config = replace(
         base.training,
-        total_environment_steps=args.total_environment_steps,
+        total_environment_steps=total_environment_steps,
         device=DeviceType(args.device),
         output_directory=str(args.output_directory),
         tensorboard_directory=tensorboard_directory,
@@ -347,6 +387,7 @@ def build_config(
         bigan=bigan_config,
         novelty=novelty_config,
         metric_eme=metric_eme_config,
+        part3=part3_config,
         training=training_config,
     )
 
@@ -390,7 +431,10 @@ def main() -> int:
         config = build_config(args, environment)
         output_directory = Path(config.training.output_directory)
         with ExperimentLogger(output_directory, config) as logger:
-            trainer = AdventurerTrainer(environment, config, logger)
+            if config.part3.enabled:
+                trainer = Part3Trainer(environment, config, logger)
+            else:
+                trainer = AdventurerTrainer(environment, config, logger)
             trainer.train()
             trainer.close()
         if args.compare_baseline_directory is not None and args.compare_transition_directory is not None:
