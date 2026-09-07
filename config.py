@@ -393,6 +393,90 @@ class MetricEMEConfig:
 
 
 @dataclass(frozen=True)
+class Part3Config:
+    """Configuration for the Part-3 representation-intervention experiment.
+
+    Part 3 is a causal-attribution study. It holds every component of the
+    system fixed and varies only the observation representation ``E``:
+
+    * ``bigan`` -- adversarial generative representation (BiGAN encoder).
+    * ``idf`` -- inverse-dynamics / action-predictive representation.
+    * ``rnd`` -- random-target prediction representation.
+
+    The transition novelty is ``N_T(s_t,a_t,s_{t+1}) = ||f(E(s_t),a_t) -
+    E(s_{t+1})||_2`` where ``f`` is one shared ``LatentForwardModel``. The
+    forward-model objective is the squared-L2 / MSE regression
+    ``mean(||f(E(s_t),a_t) - E(s_{t+1})||_2^2)`` and is identical across the
+    three representations. No L1 term appears anywhere in the Part-3
+    transition path.
+
+    All three representations are trained online during RL from the same
+    rollout data, with the same batch size, update frequency, training-start
+    condition, and replay capacity. There is no pretraining/freeze schedule and
+    no per-representation hyperparameter tuning.
+    """
+
+    enabled: bool = False
+    representation: str = "bigan"         # {bigan, idf, rnd}
+    latent_dim: int = 128
+    feature_dim: int = 256
+    hidden_dim: int = 512
+    # Shared latent forward model ``f`` (same architecture for all three).
+    forward_hidden_dim: int = 256
+    forward_learning_rate: float = 1.0e-4
+    forward_update_epochs: int = 1
+    forward_max_grad_norm: float = 0.5
+    # Shared online representation-training schedule.
+    batch_size: int = 64
+    representation_learning_rate: float = 2.0e-4
+    representation_update_interval: int = 1
+    # Extra capacity requested for either replay buffer on top of one rollout.
+    replay_capacity: Optional[int] = None
+    # Inverse-dynamics head architecture (IDF representation).
+    idf_hidden_dim: int = 256
+    # Random-target head architecture (RND representation).
+    rnd_hidden_dim: int = 256
+    # Reward processing shared across the three representations (Eq. 5).
+    normalization_epsilon: float = 1.0e-8
+    normalization_clip: Optional[float] = 5.0
+    # Stage-1 exact budget: 96*128 = 12,288 env-steps/update; the requested 2M
+    # is not divisible by 12,288, so the exact run uses
+    # 1,990,656 = 162 updates = "approximately 2M steps".
+    stage1_environment_steps: int = 1_990_656
+
+    def __post_init__(self) -> None:
+        """Validate the Part-3 representation choice and training schedule.
+
+        Input: Values supplied to this dataclass.
+        Output: No value; raises ``ValueError`` for an invalid representation,
+            non-positive dimensions, or a non-divisible update interval.
+        Mathematical meaning: Guarantees that the causal comparison is well
+            defined (one supported ``E``) and that the online schedule is
+            integer-aligned with the rollout loop.
+        """
+        if self.representation not in {"bigan", "idf", "rnd"}:
+            raise ValueError("representation must be 'bigan', 'idf', or 'rnd'")
+        if min(self.latent_dim, self.feature_dim, self.hidden_dim, self.batch_size) <= 0:
+            raise ValueError("latent_dim, feature_dim, hidden_dim, and batch_size must be positive")
+        if self.forward_hidden_dim <= 0 or self.forward_learning_rate <= 0.0:
+            raise ValueError("forward-model dimensions and learning rate must be positive")
+        if self.forward_update_epochs <= 0 or self.forward_max_grad_norm <= 0.0:
+            raise ValueError("forward-model update epochs and gradient norm must be positive")
+        if self.representation_learning_rate <= 0.0:
+            raise ValueError("representation_learning_rate must be positive")
+        if self.representation_update_interval <= 0:
+            raise ValueError("representation_update_interval must be positive")
+        if self.idf_hidden_dim <= 0 or self.rnd_hidden_dim <= 0:
+            raise ValueError("idf_hidden_dim and rnd_hidden_dim must be positive")
+        if self.normalization_epsilon <= 0.0:
+            raise ValueError("normalization_epsilon must be positive")
+        if self.normalization_clip is not None and self.normalization_clip <= 0.0:
+            raise ValueError("normalization_clip must be positive when provided")
+        if self.stage1_environment_steps <= 0:
+            raise ValueError("stage1_environment_steps must be positive")
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
     """Top-level schedule, logging, checkpoint, and device settings."""
 
@@ -449,6 +533,7 @@ class ExperimentConfig:
     bigan: BiGANConfig = BiGANConfig()
     novelty: NoveltyConfig = NoveltyConfig()
     metric_eme: MetricEMEConfig = MetricEMEConfig()
+    part3: Part3Config = Part3Config()
     training: TrainingConfig = TrainingConfig()
 
     def __post_init__(self) -> None:
@@ -475,6 +560,20 @@ class ExperimentConfig:
                 "metric_eme replaces the state novelty bonus and cannot be combined "
                 "with novelty_type='transition'"
             )
+        if self.part3.enabled:
+            # Part 3 is a standalone causal intervention: it must not be
+            # combined with the metric/EME bonus or with a different novelty
+            # type, otherwise the representation effect would be confounded.
+            if self.metric_eme.enabled:
+                raise ValueError(
+                    "part3.enabled cannot be combined with metric_eme.enabled: "
+                    "Part 3 keeps the bonus fixed and varies only the representation"
+                )
+            if self.novelty.novelty_type != "state":
+                raise ValueError(
+                    "part3.enabled requires novelty_type='state'; Part 3 defines "
+                    "its own pure transition novelty and ignores the state novelty path"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible nested representation of the configuration.

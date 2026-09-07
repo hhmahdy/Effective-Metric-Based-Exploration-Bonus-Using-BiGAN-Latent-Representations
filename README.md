@@ -210,6 +210,12 @@ Adventurer/
 │   ├── ensemble_scaling.py
 │   ├── episodic_memory.py
 │   └── intrinsic_reward.py
+├── part3/
+│   ├── __init__.py
+│   ├── rng.py
+│   ├── representations.py
+│   ├── transition_novelty.py
+│   └── trainer.py
 ├── utils/
 │   ├── logger.py
 │   ├── normalization.py
@@ -752,6 +758,186 @@ Useful ablations include:
 - `max_reward_scaling` (M) and `ensemble_size` (K) sweeps,
 - `eme_mode` in `{clamped, normalised}`,
 - frozen vs. continually trained encoder metric.
+
+## Part 3: Representation-Intervention Causal Test
+
+Part 3 is a **causal attribution** study, not an algorithm-development stage.
+It holds every component of the system fixed and varies only the observation
+representation `E` that feeds the transition novelty.
+
+### Mechanism
+
+The Part-3 transition novelty is defined exactly as:
+
+```
+N_T(s_t, a_t, s_{t+1}) = || f(E(s_t), a_t) - E(s_{t+1}) ||_2
+```
+
+where `E` is the representation under test and `f` is a **single shared**
+`LatentForwardModel` used by all three arms.
+
+- **Metric** = L2 norm, `||·||_2`, over the latent vector.
+- **Forward-model training loss** = squared L2 / MSE:
+
+```
+loss = mean( || f(E(s_t), a_t) - E(s_{t+1}) ||_2^2 )
+```
+
+This loss is identical across the three representations. **No L1 term appears
+anywhere in the Part-3 transition path.**
+
+The Part-3 path deliberately contains none of the following: BiGAN
+discriminator features, generator reconstruction, feature matching, EME, kNN,
+visit counts, episodic counts, ensemble uncertainty, adaptive scaling, state
+novelty, or any death/respawn bonus. Death/respawn transitions are not masked
+from `N_T` and receive no bonus; the trainer only logs `death/count`,
+`death/fraction_high`, and `death/novelty_percentile`.
+
+The raw `N_T` is converted to an intrinsic reward by the same Eq. (5) reward
+processing used by the rest of the pipeline (running normalization onto the
+extrinsic-reward scale). This is the **shared reward processing** across the
+three arms and is what keeps the intrinsic reward comparable even though the
+three representations produce latents on different scales.
+
+### The three representations
+
+| Arm | `E` | Objective |
+|-----|-----|-----------|
+| **BiGAN** | BiGAN encoder | **adversarial generative** representation: `(x, E(x))` and `(G(z), z)` joint distributions made indistinguishable |
+| **IDF** | encoder + inverse-dynamics head | **inverse-dynamics / action-predictive** representation: `a_t` predicted from `(E(s_t), E(s_{t+1}))` |
+| **RND** | predictor network (frozen random target) | **random-target prediction** representation: `E(s) ~= T(s)` for a frozen random `T` |
+
+The three representations are **not** interchangeable encoders; their
+objectives define genuinely different representation-learning problems. They
+all reuse the same encoder trunk and latent dimension, use the same batch size,
+update frequency, training-start condition, and replay capacity, and are all
+trained **online** during RL (no pretraining/freeze schedule, no checkpoints
+required to run).
+
+There is **no per-representation hyperparameter tuning**: no separate
+learning-rate, reward-coefficient, PPO, forward-model, normalization, or
+training-budget tuning. `E` is the only intervention.
+
+### Primary causal test
+
+```
+E_BiGAN -> N_T -> PPO
+E_IDF   -> N_T -> PPO
+E_RND   -> N_T -> PPO
+```
+
+with identical environment, PPO, `N_T`, forward model, reward processing,
+budget, and seeds; only `E` differs.
+
+### Interpretation rule
+
+Do **not** assume IDF will win. Possible outcomes:
+
+- **A.** IDF > BiGAN → supports the representation-bottleneck hypothesis.
+- **B.** BiGAN ≈ IDF → weak/no evidence for a representation bottleneck.
+- **C.** RND/IDF/BiGAN all perform poorly → suspect the transition-novelty
+  mechanism rather than the representation.
+- **D.** BiGAN > IDF despite weaker action prediction → important result;
+  investigate why.
+- **E.** High seed variance → report instability; do not hide it.
+- **F.** Better forward prediction does not improve exploration → prediction
+  quality alone is insufficient.
+
+### Configuration example
+
+```bash
+python main.py \
+  --environment-id ALE/MontezumaRevenge-v5 \
+  --part3 --representation bigan \
+  --seed 0 --num-parallel-envs 96 --rollout-steps 128 \
+  --minibatch-size 32 --device auto \
+  --output-directory runs/part3/bigan
+```
+
+`--representation` chooses `bigan`, `idf`, or `rnd`. The Stage-1 budget is
+`96 * 128 = 12,288` environment steps per update. The requested `~2M` budget is
+not divisible by `12,288`, so the exact run uses **`1,990,656`** environment
+steps = **162 updates**. This is documented as:
+
+> approximately 2M steps; exact budget constrained by rollout divisibility.
+
+`--total-environment-steps` defaults to the Stage-1 budget when `--part3` is
+set (and to the legacy `12,288,000` otherwise).
+
+### RNG isolation
+
+Part 3 uses dedicated RNG streams for PPO/actor/critic initialization,
+representation initialization, representation training, forward-model
+initialization, forward-model training, replay sampling, BiGAN latent sampling,
+and RND target initialization (see `part3/rng.py`). This does **not** claim the
+trajectories remain bit-identical across representations. The requirement is:
+
+> "Same seed and controlled RNG initialization before behavioral divergence."
+
+Once the different representations produce different intrinsic rewards, their
+trajectories are expected to diverge. That divergence is the experimental
+effect, not a confounder.
+
+### CorridorTV
+
+The Part-3 Stage-1 environment is implemented from scratch as a PyColab-style
+gridworld in `environments/corridortv.py` and registered as `CorridorTV-v0`.
+It reproduces the exact observation / reward / info contract called for by the
+Part-3 protocol:
+
+- Internal `32 x 32 x 3` grid, exposed as a `(64, 64, 3)` `uint8` observation
+  (nearest-neighbor upsampled 32x32 -> 64x64; a **fixed** preprocessing step
+  identical across representations and seeds, recorded in `metadata`).
+- `Discrete(4)` deterministic movement, a switch tile that toggles a door, and a
+  sparse `+1` goal reward (episode terminates).
+- Exactly **73** reachable controllable configurations (`agent position` x
+  `door state`), validated by exhaustive BFS; `CORRIDORTV_CONTROLLABLE_STATES = 73`.
+- Action- and agent-independent noisy TV / flicker region and a random-walk
+  colored decoy, both driven by a per-episode seeded RNG that never affects the
+  controllable transition.
+- `info` contract with `agent_position`, `door_open`, `controllable_state`,
+  `goal_reached`, `flicker_active`, `decoy_position`, and `seed`.
+
+See `tests/test_corridortv.py` for the CPU-runnable contract tests.
+
+### Stage launchers
+
+`run_part3_stage1.sh` (CorridorTV) and `run_part3_stage2.sh`
+(`ALE/MontezumaRevenge-v5`) launch the Part-3 representation-intervention runs
+over seeds x representations. Both scripts:
+
+- run preflight checks (Python imports, budget divisibility, environment
+  registration) and create the `results/part3/{raw,processed,figures,checkpoints,logs}`
+  tree;
+- skip a seed/arm whose run directory already contains `metrics.jsonl` (unless
+  `FORCE_RERUN=1`, in which case the old directory is moved to `.prev.$(date +%s)`
+  and rerun fresh);
+- execute the identical Part-3 command for every arm, varying only
+  `--representation`, and tee console output to
+  `results/part3/logs/stage{N}/{seed}_{rep}.console.log`;
+- collect per-arm exit codes, print an OK/FAILED/SKIPPED manifest, and exit
+  non-zero if any arm failed.
+
+Available overrides (environment variables): `ENVIRONMENT_ID`, `SEEDS`,
+`REPRESENTATIONS`, `NUM_PARALLEL_ENVS`, `ROLLOUT_STEPS`, `MINIBATCH_SIZE`,
+`TOTAL_ENVIRONMENT_STEPS`, `DEVICE`, `PYTHON_BIN`, `OUTPUT_ROOT`, `FORCE_RERUN`.
+
+Stage 1 defaults to `ENVIRONMENT_ID=CorridorTV-v0` with the exact budget
+`TOTAL_ENVIRONMENT_STEPS=1990656`; Stage 2 defaults to
+`ENVIRONMENT_ID=ALE/MontezumaRevenge-v5` with `TOTAL_ENVIRONMENT_STEPS=12288000`.
+
+The Stage-1 budget is documented as:
+
+> approximately 2M steps; exact budget of 1990656 = 162 updates * 12288
+> constrained by rollout divisibility
+
+(2,000,000 is not divisible by 96*128 = 12,288; the 96x128 configuration is
+intentionally not changed.)
+
+These scripts only launch runs. Analysis of each run's `metrics.jsonl` (figures,
+first-discovery, IQM, diagnostics) is a separate step; the trainer writes its
+own periodic snapshots into each run directory and the launcher leaves them
+untouched (no resume logic).
 
 ## License and Citation
 

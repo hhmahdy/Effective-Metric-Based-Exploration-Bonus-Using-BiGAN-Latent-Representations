@@ -1,0 +1,28 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+.venv_*/
+venv/
+
+# Experiment artifacts (kept out of git unless explicitly tracked)
+runs/
+*.log
+*.onnx
+*.pt
+*.pth
+*.ckpt
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
