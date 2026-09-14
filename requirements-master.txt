@@ -1,0 +1,50 @@
+# Dependencies verified for the Master's thesis experiment
+# (BiGAN state novelty vs. BiGAN transition novelty).
+#
+# The repository previously had no dependency manifest at all, so this file
+# records the exact stack the implementation and tests were verified against.
+#
+# Verified environment
+# --------------------
+#   OS            Linux x86_64 (Debian 12, glibc 2.36)
+#   Python        3.11.2
+#   torch         2.14.0        (imported as 2.14.0+cu130)
+#   numpy         2.4.6
+#   gymnasium     1.3.0
+#   ale-py        0.12.1        (provides ALE/MontezumaRevenge-v5 and its ROM)
+#   matplotlib    3.11.2        (thesis figures)
+#   tensorboard   2.21.0        (optional run logging)
+#   pytest        9.1.1         (optional; `python -m unittest` is the primary runner)
+#
+# Installation
+# ------------
+#   python -m pip install -r requirements-master.txt
+#
+# Platform note (important, do not misread the torch pin)
+# -------------------------------------------------------
+#   `pip install torch==2.14.0` on Linux resolves to the CUDA build
+#   (2.14.0+cu130) and pulls several gigabytes of NVIDIA runtime wheels
+#   (cuda-toolkit/cublas/cudart/cudnn/nccl/...). That is expected and works on
+#   machines without a GPU as well -- the runs in this project select the
+#   device explicitly through `--device {auto,cpu,cuda}`.
+#   For a CPU-only installation use the PyTorch CPU index instead, which is
+#   platform dependent and therefore not pinned here:
+#
+#       python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+#       python -m pip install numpy==2.4.6 gymnasium==1.3.0 ale-py==0.12.1 \
+#           matplotlib==3.11.2 tensorboard==2.21.0
+#
+#   The code itself targets Python 3.9+ and PyTorch 2.x (see README); the pins
+#   above are the versions used for verification, not a hard lower bound.
+#   Exact CUDA wheel availability varies by platform, so no CUDA-specific
+#   package is pinned in this file.
+
+torch==2.14.0
+numpy==2.4.6
+gymnasium==1.3.0
+ale-py==0.12.1
+matplotlib==3.11.2
+tensorboard==2.21.0
+
+# Optional test runner; the suite also runs with `python -m unittest discover -s tests`.
+pytest==9.1.1

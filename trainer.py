@@ -4,12 +4,28 @@ The trainer implements separate extrinsic/intrinsic reward streams, two-stream
 GAE, PPO with two critics, BiGAN novelty, optional resettable episodic memory,
 and N parallel environments. With the default Atari configuration it collects
 96*128=12,288 transitions per PPO rollout.
+
+Three intrinsic-reward paths are available and exactly one is active per run:
+
+* ``novelty_type="state"`` -- Adventurer's BiGAN reconstruction novelty
+  ``B(s)``. This is the Master's thesis baseline (``main.py --method state``).
+* ``novelty_type="transition"`` with ``transition_variant="master_l2"`` -- the
+  Master's thesis method ``N_T = ||f(E(s_t),a_t) - E(s_{t+1})||_2`` from
+  :mod:`exploration.master_transition` (``main.py --method transition``). It
+  executes no EME/metric code and uses a cached latent transition buffer.
+* ``novelty_type="transition"`` with ``transition_variant="legacy"`` (default)
+  -- the historical transition novelty, preserved unchanged for backward
+  compatibility (``main.py --novelty transition``).
+
+The legacy metric/EME bonus (``metric_eme.enabled``) and the resettable
+episodic memory (``training.resettable``) are off by default and are not part
+of the Master's thesis experiment.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import torch
 from torch import Tensor
@@ -33,6 +49,12 @@ from exploration.episodic_count import EpisodicLatentCountScaling
 from exploration.episodic_memory import EpisodicMemory
 from exploration.eme_metric import EMEMetricLearner
 from exploration.intrinsic_reward import IntrinsicRewardPipeline, MetricIntrinsicReward
+from exploration.master_transition import (
+    LatentTransitionBuffer,
+    LatentTransitionNovelty,
+    LatentTransitionTrainer,
+    MasterTransitionUpdateMetrics,
+)
 from exploration.novelty import NoveltyEstimator
 from exploration.transition_novelty import (
     LatentForwardModel,
@@ -85,7 +107,7 @@ class TrainingIterationMetrics:
     normalized_novelty: float
     ppo: PPOUpdateMetrics
     bigan: BiGANUpdateMetrics
-    transition: Optional[TransitionUpdateMetrics] = None
+    transition: Optional[Union[TransitionUpdateMetrics, MasterTransitionUpdateMetrics]] = None
     metric_eme: Optional[MetricEMEMetrics] = None
 
 
@@ -188,6 +210,16 @@ class AdventurerTrainer:
         self.transition_novelty = None
         self.transition_trainer = None
         self.transition_replay_buffer = None
+        # Master's thesis transition novelty (--method transition). It is a
+        # separate, explicitly selected variant; the legacy transition novelty
+        # below is preserved unchanged.
+        self.master_transition_enabled = (
+            config.novelty.novelty_type == "transition"
+            and config.novelty.transition_variant == "master_l2"
+        )
+        self.master_transition_novelty: Optional[LatentTransitionNovelty] = None
+        self.master_transition_trainer: Optional[LatentTransitionTrainer] = None
+        self.master_transition_buffer: Optional[LatentTransitionBuffer] = None
         if config.novelty.novelty_type == "state":
             self.novelty = NoveltyEstimator(
                 self.encoder,
@@ -196,6 +228,44 @@ class AdventurerTrainer:
                 config.novelty.alpha,
                 config.novelty.normalization_epsilon,
                 device=self.device,
+            )
+        elif self.master_transition_enabled:
+            # N_T = ||f(E(s_t), a_t) - E(s_{t+1})||_2 with an MSE-trained latent
+            # forward model. Same encoder, same Equation (5) normalization, and
+            # same PPO configuration as the state-novelty baseline; no generator
+            # or discriminator term is evaluated and no EME component is used.
+            master_forward_model = LatentForwardModel(
+                config.bigan.latent_dim,
+                action_dim,
+                config.novelty.transition_hidden_dim,
+                config.environment.discrete_actions,
+            )
+            self.master_transition_novelty = LatentTransitionNovelty(
+                self.encoder,
+                master_forward_model,
+                config.novelty.normalization_epsilon,
+                device=self.device,
+            )
+            self.master_transition_trainer = LatentTransitionTrainer(
+                master_forward_model,
+                learning_rate=config.novelty.transition_learning_rate,
+                batch_size=config.novelty.transition_batch_size,
+                max_grad_norm=config.novelty.transition_max_grad_norm,
+                update_epochs=config.novelty.transition_update_epochs,
+                device=self.device,
+            )
+            # Cached (z_t, a_t, z_{t+1}) triples instead of raw observations:
+            # a raw (s, a, s') buffer of one rollout costs ~10 GB at the
+            # 96x128 Montezuma configuration, the latent buffer ~12 MB.
+            self.master_transition_buffer = LatentTransitionBuffer(
+                max(
+                    config.ppo.rollout_steps * self.num_envs,
+                    config.novelty.transition_batch_size,
+                ),
+                config.bigan.latent_dim,
+                () if config.environment.discrete_actions else (action_dim,),
+                self.device,
+                torch.long if config.environment.discrete_actions else torch.float32,
             )
         else:
             forward_model = LatentForwardModel(
@@ -528,6 +598,21 @@ class AdventurerTrainer:
                     update_statistics=True,
                     extrinsic_reward=extrinsic_rewards,
                 )
+            elif self.master_transition_enabled:
+                # Master's thesis method: cache (z_t, a_t, z_{t+1}) with the
+                # encoder representation available at collection time. The
+                # latents are never re-encoded later.
+                assert self.master_transition_novelty is not None
+                novelty = self.master_transition_novelty(
+                    observations,
+                    actions,
+                    next_observations,
+                    extrinsic_rewards,
+                )
+                assert self.master_transition_buffer is not None
+                self.master_transition_buffer.add_batch(
+                    novelty.latent, actions, novelty.next_latent
+                )
             else:
                 assert self.transition_novelty is not None
                 novelty = self.transition_novelty(
@@ -710,7 +795,16 @@ class AdventurerTrainer:
             )
             ppo_metrics = self.ppo.update(self.rollout_buffer, estimate)
             bigan_metrics = self.bigan.update(self.replay_buffer)
-            if self.config.novelty.novelty_type == "transition":
+            if self.master_transition_enabled:
+                # One MSE forward-model update per PPO update; the optimizer
+                # holds only f_phi parameters, so the BiGAN encoder keeps being
+                # trained exclusively by the BiGAN adversarial objective.
+                assert self.master_transition_trainer is not None
+                assert self.master_transition_buffer is not None
+                transition_metrics = self.master_transition_trainer.update(
+                    self.master_transition_buffer
+                )
+            elif self.config.novelty.novelty_type == "transition":
                 assert self.transition_trainer is not None
                 assert self.transition_replay_buffer is not None
                 transition_metrics = self.transition_trainer.update(

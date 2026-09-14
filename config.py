@@ -35,6 +35,17 @@ class DeviceType(str, Enum):
     CUDA = "cuda"
 
 
+#: Allowed implementations of the latent transition novelty. ``"legacy"`` keeps
+#: the historical ``--novelty transition`` behavior unchanged; ``"master_l2"``
+#: is the Master's thesis method ``N_T = ||f(E(s_t),a_t) - E(s_{t+1})||_2``.
+TRANSITION_VARIANTS = ("legacy", "master_l2")
+
+#: Master's thesis experiment methods accepted by ``main.py --method``. ``state``
+#: is the Adventurer BiGAN state-novelty baseline, ``transition`` is the BiGAN
+#: action-conditioned transition novelty.
+MASTER_METHODS = ("state", "transition")
+
+
 @dataclass(frozen=True)
 class SeedConfig:
     """Control pseudorandom seeds and deterministic PyTorch behavior.
@@ -225,7 +236,31 @@ class BiGANConfig:
 
 @dataclass(frozen=True)
 class NoveltyConfig:
-    """Settings for state or transition novelty exploration."""
+    """Settings for state or transition novelty exploration.
+
+    ``novelty_type`` selects the intrinsic signal:
+
+    * ``"state"`` -- Adventurer's reconstruction novelty
+      ``B(s) = alpha*L_G(s) + (1-alpha)*L_D(s)``. This is the Master's thesis
+      baseline (``main.py --method state``).
+    * ``"transition"`` -- a latent forward-model novelty. Two implementations
+      exist and ``transition_variant`` selects between them:
+
+      - ``"legacy"`` (default, unchanged) -- the historical variant
+        ``T = alpha_t*||z'-f(z,a)||_1 + (1-alpha_t)*||f_D(s',z')-f_D(G(f(z,a)),f(z,a))||_1``
+        trained with an L1 loss on a raw ``(s,a,s')`` replay buffer. Selected by
+        ``main.py --novelty transition``.
+      - ``"master_l2"`` -- the Master's thesis method
+        ``N_T = ||f(E(s_t),a_t) - E(s_{t+1})||_2``, trained with the MSE loss
+        ``(1/B) * sum_i ||f(E(s_t),a_t) - E(s_{t+1})||_2^2`` on a cached
+        ``(z_t, a_t, z_{t+1})`` latent buffer, with no generator or
+        discriminator term. Selected by ``main.py --method transition``.
+
+    Both variants reuse the same BiGAN encoder, the same Equation (5) reward-scale
+    normalization, and the same PPO configuration; only the intrinsic signal and
+    the forward-model objective differ. ``transition_batch_size`` is used by the
+    ``"master_l2"`` variant (the legacy variant keeps using ``BiGANConfig.batch_size``).
+    """
 
     novelty_type: str = "state"
     alpha: float = 0.9
@@ -237,6 +272,10 @@ class NoveltyConfig:
     transition_learning_rate: float = 1.0e-4
     transition_update_epochs: int = 1
     transition_max_grad_norm: float = 0.5
+    # Master's thesis switch: "legacy" preserves the historical transition
+    # novelty exactly, "master_l2" selects the pure L2 forward-prediction error.
+    transition_variant: str = "legacy"
+    transition_batch_size: int = 64
 
     def __post_init__(self) -> None:
         """Validate novelty weighting and running-normalization parameters.
@@ -258,6 +297,10 @@ class NoveltyConfig:
             raise ValueError("transition model dimensions and learning rate must be positive")
         if self.transition_update_epochs <= 0 or self.transition_max_grad_norm <= 0.0:
             raise ValueError("transition update epochs and gradient norm must be positive")
+        if self.transition_variant not in TRANSITION_VARIANTS:
+            raise ValueError("transition_variant must be 'legacy' or 'master_l2'")
+        if self.transition_batch_size <= 0:
+            raise ValueError("transition_batch_size must be positive")
         if not 0.0 <= self.running_momentum < 1.0:
             raise ValueError("running_momentum must be in [0, 1)")
         if self.normalization_epsilon <= 0.0:

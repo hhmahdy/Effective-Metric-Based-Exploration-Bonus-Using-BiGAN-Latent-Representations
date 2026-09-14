@@ -3,6 +3,20 @@
 This module assembles the validated configuration, environment adapter,
 logger, and end-to-end trainer. Algorithmic implementation remains in the
 modular agent, BiGAN, exploration, and trainer modules.
+
+Master's thesis experiment
+--------------------------
+``--method state`` runs the Adventurer BiGAN state-novelty baseline and
+``--method transition`` runs the BiGAN action-conditioned transition novelty
+``N_T = ||f(E(s_t),a_t) - E(s_{t+1})||_2``. Both use the identical environment,
+preprocessing, PPO configuration, and training budget; only the intrinsic
+signal differs. ``--method`` is mutually exclusive with the legacy selectors
+(``--novelty``, ``--novelty-type``) and with the legacy EME/metric flags, so an
+ambiguous or unfair comparison cannot be launched by accident.
+
+Every run writes ``config.json`` (experimental configuration) and
+``run_info.json`` (execution/reproducibility metadata: git commit, library
+versions, resolved device, key settings).
 """
 
 from __future__ import annotations
@@ -12,6 +26,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from config import (
+    MASTER_METHODS,
     DeviceType,
     EnvironmentConfig,
     ExperimentConfig,
@@ -24,6 +39,7 @@ from trainer import AdventurerTrainer
 from evaluation.comparison import save_game_score_comparison
 from utils.seed import derive_seed
 from utils.logger import ExperimentLogger
+from utils.run_metadata import resolve_device_label, write_run_info
 
 
 def _parse_boolean(value: str) -> bool:
@@ -49,6 +65,21 @@ NOVELTY_ALIASES = {
     "transition": ("transition", False),
     # V2/V3: metric bonus ||E(s_t)-E(s_{t+1})||_p, optionally EME-scaled.
     "latent_discrepancy": ("state", True),
+}
+
+# Master's thesis experiment (--method). Only two intrinsic-reward signals are
+# compared, and both use the identical environment, preprocessing, PPO
+# configuration, and training budget:
+#
+#   state      -> Adventurer BiGAN state novelty B(s)                (baseline)
+#   transition -> BiGAN latent transition novelty
+#                 N_T = ||f(E(s_t),a_t) - E(s_{t+1})||_2              (proposed)
+#
+# The legacy transition novelty (--novelty transition) is a different, older
+# implementation and is deliberately NOT selected by --method transition.
+METHOD_TO_NOVELTY = {
+    "state": ("state", "legacy", False),
+    "transition": ("transition", "master_l2", False),
 }
 
 
@@ -93,7 +124,19 @@ def parse_args() -> argparse.Namespace:
         default=0.3,
         help="single beta applied to intrinsic advantage after independent GAE",
     )
-    parser.add_argument("--novelty-type", choices=["state", "transition"], default="state")
+    parser.add_argument(
+        "--method",
+        choices=list(MASTER_METHODS),
+        default=None,
+        help=(
+            "Master's thesis experiment selector: 'state' runs the Adventurer "
+            "BiGAN state-novelty baseline, 'transition' runs the BiGAN "
+            "action-conditioned transition novelty "
+            "N_T = ||f(E(s_t),a_t) - E(s_{t+1})||_2. Mutually exclusive with "
+            "--novelty/--novelty-type and with the legacy EME/metric flags."
+        ),
+    )
+    parser.add_argument("--novelty-type", choices=["state", "transition"], default=None)
     parser.add_argument(
         "--novelty",
         choices=sorted(NOVELTY_ALIASES),
@@ -198,6 +241,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--state-alpha", type=float, default=0.9)
     parser.add_argument("--transition-alpha", type=float, default=0.9)
+    parser.add_argument(
+        "--transition-batch-size",
+        dest="transition_batch_size",
+        type=int,
+        default=64,
+        help=(
+            "minibatch size B of the Master's forward-model MSE objective; the "
+            "thesis experiment uses the default 64 for both methods, and only "
+            "tiny smoke configurations need a smaller value"
+        ),
+    )
     parser.add_argument("--compare-baseline-directory", type=Path, default=None)
     parser.add_argument("--compare-transition-directory", type=Path, default=None)
     parser.add_argument("--comparison-output-directory", type=Path, default=None)
@@ -209,7 +263,50 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--episodic-memory-size", type=int, default=10)
     parser.add_argument("--bigan-batch-size", type=int, default=64)
-    return parser.parse_args()
+    return _validate_method_selection(parser.parse_args(), parser)
+
+
+def _validate_method_selection(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+) -> argparse.Namespace:
+    """Reject ambiguous or unfair combinations of the Master's ``--method`` flag.
+
+    Input: Parsed arguments and the parser used for error reporting.
+    Output: The same namespace when the selection is unambiguous.
+    Mathematical meaning: Guarantees that the two compared conditions differ
+        only in the intrinsic-reward signal, never in the novelty variant or in
+        an additional legacy bonus term.
+    """
+    if args.method is None:
+        return args
+    if args.novelty is not None:
+        parser.error(
+            f"--method {args.method} cannot be combined with --novelty {args.novelty}: "
+            "--method selects the Master's thesis variant, --novelty selects the "
+            "legacy variant (for example '--novelty transition' is the old L1 + "
+            "discriminator-feature transition novelty, not the Master's method)"
+        )
+    if args.novelty_type is not None:
+        parser.error(
+            f"--method {args.method} cannot be combined with --novelty-type "
+            f"{args.novelty_type}: use one selector only"
+        )
+    legacy_bonus_flags = []
+    if args.eme:
+        legacy_bonus_flags.append("--eme")
+    if args.metric_learning != "none":
+        legacy_bonus_flags.append("--metric-learning")
+    if args.episodic_count_scaling:
+        legacy_bonus_flags.append("--episodic-count-scaling")
+    if legacy_bonus_flags:
+        parser.error(
+            f"--method {args.method} cannot be combined with "
+            f"{', '.join(legacy_bonus_flags)}: the Master's thesis experiment "
+            "compares BiGAN state novelty with BiGAN transition novelty only, "
+            "with no EME, ensemble, adaptive, or visit-count bonus"
+        )
+    return args
 
 
 def _space_dimensions(environment: object) -> tuple[tuple[int, ...], int, bool]:
@@ -297,18 +394,26 @@ def build_config(
         resettable=args.resettable,
         episodic_memory_size=args.episodic_memory_size,
     )
-    novelty_type, metric_enabled = NOVELTY_ALIASES.get(
-        args.novelty, (args.novelty_type, False)
-    )
+    if args.method is not None:
+        # Master's thesis selection: exactly one intrinsic-reward signal, no
+        # legacy metric/EME bonus.
+        novelty_type, transition_variant, metric_enabled = METHOD_TO_NOVELTY[args.method]
+    else:
+        novelty_type, metric_enabled = NOVELTY_ALIASES.get(
+            args.novelty, (args.novelty_type or "state", False)
+        )
+        transition_variant = "legacy"
     novelty_config = replace(
         base.novelty,
         novelty_type=novelty_type,
+        transition_variant=transition_variant,
         alpha=args.state_alpha,
         transition_alpha=args.transition_alpha,
+        transition_batch_size=args.transition_batch_size,
     )
     # V2 is the latent metric without ensemble scaling (optionally habituated
     # with episodic counts); V3/V4 add the EME variance scaling modes.
-    ensemble_scaling = bool(args.eme)
+    ensemble_scaling = bool(args.eme) and args.method is None
     metric_eme_config = replace(
         base.metric_eme,
         enabled=metric_enabled or ensemble_scaling,
@@ -390,6 +495,15 @@ def main() -> int:
         config = build_config(args, environment)
         output_directory = Path(config.training.output_directory)
         with ExperimentLogger(output_directory, config) as logger:
+            # Execution metadata; config.json (written by the logger) remains
+            # the record of the experimental configuration.
+            write_run_info(
+                output_directory,
+                config,
+                method=args.method,
+                environment_id=args.environment_id,
+                device_label=resolve_device_label(config.training.device.value),
+            )
             trainer = AdventurerTrainer(environment, config, logger)
             trainer.train()
             trainer.close()
