@@ -17,6 +17,214 @@ training pipeline are implemented directly in Python and PyTorch.
 > repository records configurations and separates algorithmic components so
 > those details can be audited and modified explicitly.
 
+## Master's Thesis Experiment
+
+> This project investigates the effectiveness of action-conditioned transition
+> novelty within a BiGAN-based exploration framework. Transition novelty itself
+> is an established idea in the reinforcement-learning exploration literature;
+> **this thesis does not claim to invent transition novelty**. The contribution
+> is the controlled empirical study of transition novelty inside the
+> BiGAN/Adventurer representation and reward pipeline described below.
+
+### Research question
+
+> Does transition-based intrinsic reward improve exploration compared with the
+> original BiGAN-based state novelty used in Adventurer?
+
+Two experimental conditions are compared. They differ **only** in the intrinsic
+exploration signal; the environment, preprocessing, PPO architecture and
+hyperparameters, rollout geometry, training budget, and seeds are identical,
+and no hyperparameter is tuned per method.
+
+|  | Experiment A -- baseline | Experiment B -- proposed |
+|---|---|---|
+| command | `python main.py --method state ...` | `python main.py --method transition ...` |
+| intrinsic signal | Adventurer BiGAN state novelty `B(s)` | BiGAN action-conditioned transition novelty `N_T` |
+| formula | `B(s) = alpha*L_G(s) + (1-alpha)*L_D(s)` | `N_T = \|\| f(E(s_t), a_t) - E(s_{t+1}) \|\|_2` |
+| extra networks | none (BiGAN as published) | one latent forward MLP `f` |
+| legacy code used | none | none |
+
+The proposed method is, exactly:
+
+```text
+Observation -> BiGAN encoder E -> z_t
+(z_t, one-hot a_t) -> forward model f -> predicted z_{t+1}
+N_T = || predicted z_{t+1} - E(s_{t+1}) ||_2        (L2, not squared, not L1)
+intrinsic reward = Equation (5) normalization of N_T  (same mechanism as baseline)
+-> two-stream GAE / PPO (unchanged)
+```
+
+with `z_t = E(s_t)`, `z_{t+1} = E(s_{t+1})`, `hat_z_{t+1} = f(z_t, a_t)` and
+
+```text
+L_f = (1/B) * sum_i || f(E(s_t), a_t) - E(s_{t+1}) ||_2^2
+```
+
+Forward-model settings (identical to `NoveltyConfig` defaults): MLP
+`(z + one-hot a) -> 256 -> 256 -> z`, Adam `lr = 1e-4`, `B = 64`, gradient-norm
+clip `0.5`, one update per PPO update. The BiGAN encoder is **excluded** from
+this optimizer -- it keeps being trained by the BiGAN adversarial objective
+alone -- and no generator or discriminator term, no EME/ensemble scaling, no
+adaptive scaling, and no visit or episodic counts contribute to `N_T`.
+
+Latent targets are cached at collection time as `(z_t, a_t, z_{t+1})` and are
+never re-encoded later. This is deliberate: a raw `(s_t, a_t, s_{t+1})` replay
+of one rollout costs roughly 10 GB at the 96x128 Montezuma configuration, while
+the latent buffer costs a few megabytes. The consequence is documented: the
+regression target is the encoder representation *available when the transition
+was collected*, i.e. the encoder state before that update's BiGAN step.
+
+### Fairness between the two conditions
+
+`scripts/smoke_master.sh` automatically asserts that both Master's runs record
+identical `ppo`, `bigan`, `environment`, `seed`, and training-budget settings in
+`config.json`, that the shared Equation (5) normalization settings match, that
+the legacy EME/metric bonus is disabled in both, and that the forward-model
+settings are the documented ones. Only `novelty.novelty_type` and
+`novelty.transition_variant` are allowed to differ.
+
+### Installation
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+python -m pip install -r requirements-master.txt   # verified versions + notes
+```
+
+`requirements-master.txt` documents the verified stack (Python 3.11.2, torch
+2.14.0, gymnasium 1.3.0, numpy 2.4.6, ale-py 0.12.1) and explains the
+platform-dependent CUDA/CPU wheel situation. Atari environments need `ale-py`
+(for `ALE/MontezumaRevenge-v5`); the smoke test does not.
+
+### Smoke test (tiny, CPU, a few minutes at most)
+
+```bash
+bash scripts/smoke_master.sh
+```
+
+It runs both Master's methods and the legacy transition path on a tiny
+CartPole configuration (64 environment steps each) and verifies: processes
+start, the environment works, PPO updates complete, the intrinsic reward is
+finite, the forward model updates (`transition/updated`, finite MSE), the
+output files exist (`config.json`, `run_info.json`, `metrics.jsonl`,
+`run.log`), the two methods share one configuration, the aggregation and
+figure scripts run, and the whole unit test suite passes. Montezuma is
+deliberately not used; override with `SMOKE_ENV=ALE/MontezumaRevenge-v5
+SMOKE_TOTAL_STEPS=256` to exercise the real environment briefly.
+
+### Full experiment
+
+```bash
+# default: ALE/MontezumaRevenge-v5, 96 envs, 12.288M steps, seeds 0 1 2
+bash scripts/run_master_experiments.sh
+
+# example overrides
+DEVICE=cuda NUM_ENVS=96 TOTAL_STEPS=12288000 SEEDS="0 1 2" \
+    bash scripts/run_master_experiments.sh
+DEVICE=cpu SEEDS="0 1 2 3 4" bash scripts/run_master_experiments.sh
+```
+
+The driver runs `state` seeds 0,1,2 then `transition` seeds 0,1,2, writes
+`training.log` per run, prints the git commit before training, verifies
+dependencies and schedule consistency, refuses to write into an existing run
+directory (`OVERWRITE=1` overrides), stops immediately on the first failed run
+(no silent retries), and finally aggregates and plots. Individual runs can
+also be launched by hand:
+
+```bash
+python main.py --method state      --env ALE/MontezumaRevenge-v5 --seed 0 \
+    --num-parallel-envs 96 --rollout-steps 128 --minibatch-size 32 \
+    --total-environment-steps 12288000 --device cuda \
+    --output-directory results/master/state/seed_0
+python main.py --method transition --env ALE/MontezumaRevenge-v5 --seed 0 \
+    --num-parallel-envs 96 --rollout-steps 128 --minibatch-size 32 \
+    --total-environment-steps 12288000 --device cuda \
+    --output-directory results/master/transition/seed_0
+```
+
+### Output structure
+
+```text
+results/
+└── master/
+    ├── state/
+    │   ├── seed_0/
+    │   │   ├── config.json        # experimental configuration
+    │   │   ├── run_info.json      # execution/reproducibility metadata
+    │   │   ├── metrics.csv        # update-level metric table (aggregation)
+    │   │   ├── metrics.jsonl      # per-update + per-episode diagnostics
+    │   │   ├── run.log            # text log
+    │   │   ├── training.log       # captured stdout/stderr of the run
+    │   │   ├── plt/  tensorboard/
+    │   └── seed_1/ ...
+    ├── transition/
+    │   └── seed_0/ ...            # same layout
+    ├── master_summary.csv         # method, seed, final score, returns, ...
+    ├── master_summary_stats.csv   # mean / std / median per method
+    └── figures/                   # the five thesis figures
+```
+
+### Reproducibility
+
+Every run writes two complementary files: `config.json` records the complete
+experimental configuration (frozen dataclasses), while `run_info.json` records
+execution metadata -- git commit, dirty flag, branch, UTC timestamp, Python /
+PyTorch / Gymnasium / ALE / NumPy versions, platform, resolved device,
+environment id, seed, environment count, rollout steps, total environment
+steps, the selected method, and a `key_settings` block with the PPO/BiGAN/
+novelty values a thesis appendix needs. `run_info.json` never replaces
+`config.json`. Seeds 0, 1, 2 are the default experimental set (add 3, 4 when
+compute allows); individual seed results are always reported, and with three
+seeds the summary reports mean/std/median without claiming significance.
+
+### Metrics and figures
+
+Primary metric: true extrinsic game score. Secondary: cumulative extrinsic
+reward, final game score, first positive reward step, episode length/count,
+intrinsic reward, and learning curves.
+
+```bash
+python scripts/summarize_master_results.py --results-dir results/master
+python scripts/plot_master_results.py      --results-dir results/master
+```
+
+`master_summary.csv` contains one row per (method, seed) with
+`method, seed, final_score, total_extrinsic_return, first_reward_step,
+episode_count`; `first_reward_step = -1` means the run never obtained a
+positive extrinsic reward, which is a valid and informative outcome on a
+sparse-reward game. The five figures are: game score vs. environment steps,
+mean +/- standard deviation across seeds, individual seed curves, first
+positive reward time per run, and intrinsic reward over training.
+
+### Command-line selectors
+
+Three concepts coexist and are deliberately kept distinct:
+
+| selector | meaning |
+|---|---|
+| `--method state` | Master's baseline: Adventurer BiGAN state novelty |
+| `--method transition` | Master's proposed method: `N_T = ||f(E(s_t),a_t) - E(s_{t+1})||_2` |
+| `--novelty transition` | **legacy** transition novelty (L1 latent error + discriminator feature term), preserved unchanged for backward compatibility |
+
+`--method` is mutually exclusive with `--novelty`, `--novelty-type`, and with
+the legacy bonus flags (`--eme`, `--metric-learning`, `--episodic-count-scaling`):
+ambiguous or unfair combinations exit with an explicit error instead of
+silently launching a wrong comparison. `--transition-batch-size` (default 64)
+exposes the forward-model minibatch; only tiny smoke configurations need a
+smaller value.
+
+### Not part of the Master's experiment
+
+The EME/metric exploration bonus (`exploration/state_discrepancy.py`,
+`exploration/ensemble_scaling.py`, `exploration/episodic_count.py`,
+`exploration/eme_metric.py`, `MetricIntrinsicReward`), the resettable episodic
+memory, the legacy transition novelty (`exploration/transition_novelty.py`),
+and `run_metric_eme_comparison.sh` are previous research work. They remain on
+disk, default-disabled, and covered by `tests/test_metric_eme.py`, but the
+Master's experiment neither imports their logic at run time nor executes it:
+`metric_eme.enabled` is `False` and `resettable` is `False` in every Master's
+run, enforced by the CLI validation above. See
+*Legacy / Previous EME Experiments* further below.
+
 ## Features
 
 - Python 3.9-compatible codebase
@@ -204,21 +412,36 @@ Adventurer/
 │   ├── losses.py
 │   └── trainer.py
 ├── exploration/
-│   ├── novelty.py
-│   ├── transition_novelty.py
-│   ├── state_discrepancy.py
-│   ├── ensemble_scaling.py
-│   ├── episodic_memory.py
-│   └── intrinsic_reward.py
+│   ├── novelty.py              # Adventurer state novelty B(s)  [Master's baseline]
+│   ├── master_transition.py    # Master's N_T = ||f(E(s),a)-E(s')||_2  [Master's method]
+│   ├── transition_novelty.py   # LEGACY transition novelty (kept, unchanged)
+│   ├── intrinsic_reward.py     # Eq. (5) pipeline + LEGACY MetricIntrinsicReward
+│   ├── state_discrepancy.py    # LEGACY latent metric
+│   ├── ensemble_scaling.py     # LEGACY EME reward ensemble
+│   ├── episodic_count.py       # LEGACY visit-count habituation
+│   ├── eme_metric.py           # LEGACY learned EME metric
+│   └── episodic_memory.py      # LEGACY resettable episodic memory
 ├── utils/
 │   ├── logger.py
 │   ├── normalization.py
 │   ├── replay.py
+│   ├── transition_replay.py
+│   ├── run_metadata.py         # run_info.json execution metadata
 │   └── seed.py
+├── scripts/
+│   ├── run_master_experiments.sh   # Master's experiment driver
+│   ├── smoke_master.sh             # tiny CPU smoke test
+│   ├── summarize_master_results.py # master_summary.csv + per-seed metrics.csv
+│   └── plot_master_results.py      # the five thesis figures
 ├── environments/
-│   └── adapter.py
+│   ├── adapter.py
+│   └── vector_adapter.py
+├── evaluation/
+│   └── comparison.py
+├── requirements-master.txt
 └── tests/
-    └── test_metric_eme.py
+    ├── test_master_transition.py   # Master's method tests + smoke runs
+    └── test_metric_eme.py          # LEGACY EME/metric tests (kept, passing)
 ```
 
 ## Installation
@@ -252,8 +475,15 @@ python --version
 ```
 
 The project targets Python 3.9 and a PyTorch 2.x release that supports Python 3.9.
+The Master's experiment was additionally verified on Python 3.11.2 with the
+stack recorded in `requirements-master.txt`.
 
 ## Running an Experiment
+
+> **Master's thesis users:** start with the *Master's Thesis Experiment*
+> section above (`--method state` / `--method transition`,
+> `scripts/smoke_master.sh`, `scripts/run_master_experiments.sh`). The generic
+> commands below document the underlying pipeline and its legacy selectors.
 
 The default command uses `CartPole-v1`, which is useful for validating the
 pipeline interface:
@@ -431,11 +661,23 @@ sufficient for bitwise reproducibility across machines.
 
 ## Testing
 
-Run the currently included unit test with:
+Run the complete suite (Master's transition tests plus the legacy EME/metric
+tests) with either runner:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py" -v
+python -m pytest tests -q
 ```
+
+`tests/test_master_transition.py` covers the Master's method: the analytic L2
+prediction error, the MSE forward-model objective, one-hot action encoding,
+encoder exclusion from the forward-model optimizer (bitwise parameter
+equality), latent buffer shapes and circular behaviour, finite intrinsic
+rewards under sparse/degenerate inputs, the `--method` selection rules, and
+tiny end-to-end runs of the baseline, the proposed method, and the legacy
+transition path. `tests/test_metric_eme.py` keeps the legacy EME/metric
+mathematics covered; its expected values are computed analytically or by an
+independent reference computation.
 
 The advantage tests analytically verify:
 
@@ -469,7 +711,15 @@ Additional tests should be added before publication-scale experiments for:
 - Novelty statistics are detached from neural-network computation graphs.
 - Logging is dependency-light and machine-readable.
 
-## Transition-Level Novelty Variant
+## Legacy Transition-Level Novelty Variant (`--novelty transition`)
+
+> **Legacy / previous work -- not part of the Master's thesis experiment.**
+> The Master's proposed method is `--method transition` (see *Master's Thesis
+> Experiment* above). The variant documented here is the historical
+> implementation with an L1 latent error, a discriminator feature-matching
+> term, an L1 forward-model loss, and a raw `(s, a, s')` replay buffer; it is
+> preserved unchanged for backward compatibility and is exercised by the test
+> suite and by `scripts/smoke_master.sh`.
 
 The project supports two intrinsic-reward strategies:
 
@@ -584,12 +834,22 @@ runs/solaris-comparison/game_score_comparison.png
 The CSV contains raw and rolling game scores for both variants. The PNG uses
 identical axes and a 300 DPI publication-style figure.
 
-## Metric-Based Exploration Bonus (BiGAN Latent + EME Scaling)
+## Legacy / Previous EME Experiments -- not part of the Master's thesis experiment
+
+> **Legacy / previous research -- off the Master's main path.** Everything in
+> this section (BiGAN latent discrepancy, EME reward ensembles, zeta scaling,
+> episodic counts, learned metric `d_phi`, encoder freezing) is disabled by
+> default, is not executed by `--method state` or `--method transition`, and is
+> not driven by `scripts/run_master_experiments.sh`. It is kept because it is
+> previous published-in-progress work with its own test coverage, and because
+> `run_metric_eme_comparison.sh` must keep working for that line of research.
+
+### Metric-based exploration bonus (BiGAN latent + EME scaling)
 
 Adventurer scores a single state by how badly the BiGAN reconstructs it. This
-contribution replaces that reconstruction-error novelty with a *metric* bonus
-computed directly in the encoder's latent space and scaled by the epistemic
-disagreement of an ensemble of reward models, as in EME:
+previous contribution replaces that reconstruction-error novelty with a *metric*
+bonus computed directly in the encoder's latent space and scaled by the
+epistemic disagreement of an ensemble of reward models, as in EME:
 
 \[
 b_t=\underbrace{\left\|E_\psi(s_t)-E_\psi(s_{t+1})\right\|_p}_{\text{latent state discrepancy}}
@@ -660,7 +920,7 @@ the latent distance and the clamped scale.
 | **V1 (Baseline)** Adventurer original | `python main.py --env ALE/MontezumaRevenge-v5 --novelty bigan` |
 | **V2** Latent discrepancy only | `python main.py --env ALE/MontezumaRevenge-v5 --novelty latent_discrepancy` |
 | **V3** Latent + clamped `zeta` (EME exactly) | `python main.py --env ALE/MontezumaRevenge-v5 --novelty latent_discrepancy --eme True --ensemble_K 5` |
-| **V4 (Ours)** Latent + normalised `zeta` | `python main.py --env ALE/MontezumaRevenge-v5 --novelty latent_discrepancy --eme True --eme-mode normalised --ensemble_K 5` |
+| **V4** Latent + normalised `zeta` (previous work's setting) | `python main.py --env ALE/MontezumaRevenge-v5 --novelty latent_discrepancy --eme True --eme-mode normalised --ensemble_K 5` |
 
 The four variants isolate one factor each: V2 removes EME's scaling from the
 metric bonus, V3 restores it in its published clamped form, and V4 replaces the
@@ -737,7 +997,9 @@ configuration.
 
 ### Research ablations
 
-Useful ablations include:
+The ablations marked *(legacy)* belong to the previous EME/metric line of
+research and are not part of the Master's thesis comparison. Useful ablations
+include:
 
 - extrinsic-only PPO,
 - `alpha=1.0` pixel novelty only,
@@ -748,10 +1010,10 @@ Useful ablations include:
 - replay-capacity sweeps,
 - different latent dimensions,
 - different PPO clipping coefficients,
-- `latent_norm` in `{L1, L2}` for the metric bonus,
-- `max_reward_scaling` (M) and `ensemble_size` (K) sweeps,
-- `eme_mode` in `{clamped, normalised}`,
-- frozen vs. continually trained encoder metric.
+- *(legacy)* `latent_norm` in `{L1, L2}` for the metric bonus,
+- *(legacy)* `max_reward_scaling` (M) and `ensemble_size` (K) sweeps,
+- *(legacy)* `eme_mode` in `{clamped, normalised}`,
+- *(legacy)* frozen vs. continually trained encoder metric.
 
 ## License and Citation
 
