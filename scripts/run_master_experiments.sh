@@ -19,14 +19,31 @@
 # (--novelty transition) are NOT part of this experiment and are never launched
 # by this script.
 #
+# Environment: the default is the Noisy-TV maze of "Large-Scale Study of
+# Curiosity-Driven Learning" (the Unity project luchris429/noisy-tv-env),
+# reconstructed in pure python in environments/noisy_tv_maze.py: 17 rooms and
+# 18 corridors, 84x84 RGB first-person frames, six discrete actions, a sparse
+# +1 reward 2.5 units from the goal sphere, and the stochastic television the
+# paper uses to expose the noisy-TV failure mode.
+#
+#   ENV_NAME=NoisyTVMaze-v0    the reconstruction (no Unity, no ROM, CPU-friendly)
+#   ENV_NAME=NoisyTVUnity-v0   the original Unity build, when the executable
+#                              and the upstream `unityagents` client are present
+#   ENV_NAME=ALE/MontezumaRevenge-v5   the Atari benchmark used elsewhere in the thesis
+#
 # Usage:
 #   bash scripts/run_master_experiments.sh
-#   DEVICE=cuda NUM_ENVS=96 TOTAL_STEPS=12288000 SEEDS="0 1 2" \
-#       bash scripts/run_master_experiments.sh
+#   DEVICE=cpu NUM_ENVS=16 TOTAL_STEPS=1024000 SEEDS="0 1 2" \
+#       bash scripts/run_master_experiments.sh                      # quick scale
+#   ENV_NAME=ALE/MontezumaRevenge-v5 DEVICE=cuda NUM_ENVS=96 \
+#       TOTAL_STEPS=12288000 SEEDS="0 1 2" bash scripts/run_master_experiments.sh
 #
 # Configurable variables (defaults in brackets):
-#   ENV_NAME              [ALE/MontezumaRevenge-v5]
-#   DEVICE                [cuda]     auto|cpu|cuda
+#   ENV_NAME              [NoisyTVMaze-v0]  or any registered Gymnasium ID,
+#                                           e.g. NoisyTVUnity-v0,
+#                                           ALE/MontezumaRevenge-v5,
+#                                           CartPole-v1
+#   DEVICE                [auto]     auto|cpu|cuda  (auto = cuda if available)
 #   NUM_ENVS              [96]
 #   ROLLOUT_STEPS         [128]
 #   MINIBATCH_SIZE        [32]
@@ -51,8 +68,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "${SCRIPT_DIR}")"
 cd "${ROOT_DIR}"
 
-ENV_NAME="${ENV_NAME:-ALE/MontezumaRevenge-v5}"
-DEVICE="${DEVICE:-cuda}"
+ENV_NAME="${ENV_NAME:-NoisyTVMaze-v0}"
+DEVICE="${DEVICE:-auto}"
 NUM_ENVS="${NUM_ENVS:-96}"
 ROLLOUT_STEPS="${ROLLOUT_STEPS:-128}"
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-32}"
@@ -138,6 +155,25 @@ fi
 if [[ "${ENV_NAME}" == ALE/* ]]; then
     if ! "${PYTHON}" -c "import ale_py" >/dev/null 2>&1; then
         echo "ERROR: ${ENV_NAME} requires ale-py (see requirements-master.txt)" >&2
+        exit 1
+    fi
+fi
+
+# The Noisy-TV environments live in this repository, so check up front that the
+# requested one can actually be created instead of failing on the first run.
+if [[ "${ENV_NAME}" == NoisyTV* ]]; then
+    if ! "${PYTHON}" -c "
+from environments.noisy_tv_unity import register_environment, unity_available
+
+register_environment()
+if '${ENV_NAME}' == 'NoisyTVUnity-v0' and not unity_available():
+    raise SystemExit('the original Unity build or its client is missing')
+" >/dev/null 2>&1; then
+        echo "ERROR: ${ENV_NAME} is not available." >&2
+        echo "       NoisyTVMaze-v0 is the pure-python reconstruction and needs gymnasium only." >&2
+        echo "       NoisyTVUnity-v0 additionally needs the Unity player executable and the" >&2
+        echo "       upstream unityagents client; see environments/noisy_tv_unity.py for the" >&2
+        echo "       download and install steps, or use make_noisy_tv_environment('auto')." >&2
         exit 1
     fi
 fi

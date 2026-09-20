@@ -46,5 +46,19 @@ ale-py==0.12.1
 matplotlib==3.11.2
 tensorboard==2.21.0
 
+# Optional: the default environment (the Noisy-TV maze, `NoisyTVMaze-v0`) is
+# implemented in this repository and needs gymnasium only. Only the ORIGINAL
+# Unity build (`NoisyTVUnity-v0`) needs the extra pieces below:
+#
+#   pillow            the upstream `unityagents` client decodes JPEG frames with
+#                     PIL (it is not pinned here because the client itself ships
+#                     with the environment repository, not with this project)
+#   unityagents       vendored in https://github.com/luchris429/noisy-tv-env;
+#                     install it with `python -m pip install -e path/to/noisy-tv-env`
+#   the player binary download link is in that repository's README; point
+#                     `NoisyTVUnityConfig(file_name=...)` at it, or leave
+#                     `make_noisy_tv_environment("auto")` to use the pure-python
+#                     reconstruction instead.
+
 # Optional test runner; the suite also runs with `python -m unittest discover -s tests`.
 pytest==9.1.1

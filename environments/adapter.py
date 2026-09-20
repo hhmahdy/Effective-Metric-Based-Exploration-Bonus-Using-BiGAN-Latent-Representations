@@ -335,9 +335,19 @@ def make_gymnasium_environment(
     Output: ``SingleEnvironmentAdapter`` around the created environment.
     Mathematical meaning: Instantiates the MDP whose transition samples are
         used to optimize PPO and collect BiGAN observations.
+
+    The repository's own Noisy-TV environments are registered here, so
+    ``--env NoisyTVMaze-v0`` (the pure-python reconstruction of the maze) and
+    ``--env NoisyTVUnity-v0`` (the original Unity build, when its executable and
+    the upstream ``unityagents`` client are available) work without an extra
+    import step. Registration is a no-op if a different environment already
+    claims an ID.
     """
     try:
         import gymnasium as gym
+        from environments.noisy_tv_unity import register_environment
+
+        register_environment()
         if environment_id.startswith("ALE/"):
             import ale_py  # noqa: F401
         if environment_id.startswith(("Fetch", "Hand", "Adroit", "PointMaze", "AntMaze")):

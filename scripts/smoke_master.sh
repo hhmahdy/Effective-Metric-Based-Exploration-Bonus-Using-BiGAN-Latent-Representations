@@ -19,6 +19,12 @@
 # Usage:
 #   bash scripts/smoke_master.sh
 #   SMOKE_ENV=ALE/MontezumaRevenge-v5 SMOKE_TOTAL_STEPS=256 bash scripts/smoke_master.sh
+#   SMOKE_ENV=NoisyTVMaze-v0 SMOKE_TOTAL_STEPS=256 bash scripts/smoke_master.sh
+#
+# SMOKE_ENV=NoisyTVMaze-v0 exercises the Noisy-TV maze of "Large-Scale Study
+# of Curiosity-Driven Learning" (84x84 RGB frames, sparse reward, stochastic
+# television) instead of CartPole's vector observations, so the convolutional
+# BiGAN/PPO path is covered end to end on the environment the thesis uses.
 #
 # Configurable variables (defaults in brackets):
 #   SMOKE_ENV          [CartPole-v1]
