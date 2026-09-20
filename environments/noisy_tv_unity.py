@@ -49,8 +49,10 @@ from __future__ import annotations
 
 import glob
 import os
+import socket
+import sys
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -83,6 +85,11 @@ ACTIONS = 6
 """Discrete actions of the upstream brain (``actionSize: 6``)."""
 
 OBSERVATION_SHAPE = (84, 84, 3)
+
+#: How many worker ids (i.e. ports) the adapter may scan for a free one. The
+#: upstream client binds ``base_port + worker_id``, and one player per worker is
+#: needed because a training run builds several environments in one process.
+WORKER_ID_SEARCH_LIMIT = 64
 """Upstream camera resolution (``84x84``, ``blackAndWhite: 0``)."""
 
 
@@ -139,19 +146,136 @@ def _ensure_numpy_aliases() -> None:
         np.int_ = np.int64  # type: ignore[attr-defined]
 
 
+def client_search_paths() -> Tuple[str, ...]:
+    """Return the directories searched for the upstream ``unityagents`` client.
+
+    Input: None; reads the ``NOISY_TV_ENV_PATH`` environment variable.
+    Output: Tuple of candidate directories, most specific first.
+    Mathematical meaning: None; it locates the transport layer that ships with
+        the reference environment repository instead of with this project.
+    """
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates: List[str] = []
+    configured = os.environ.get("NOISY_TV_ENV_PATH", "").strip()
+    if configured:
+        candidates.extend(part for part in configured.split(os.pathsep) if part)
+    candidates.extend(
+        [
+            os.path.join(project_root, "third_party", "noisy-tv-env"),
+            os.path.join(project_root, "noisy-tv-env"),
+            os.path.join(os.path.expanduser("~"), "noisy-tv-env"),
+            os.path.join(os.path.expanduser("~"), ".local", "share", "noisy-tv-env"),
+        ]
+    )
+    return tuple(candidates)
+
+
 def _client_module() -> Any:
     """Import the upstream python client with its NumPy aliases in place.
 
     Input: None.
     Output: The ``unityagents`` module object, or ``None`` when unavailable.
     Mathematical meaning: None; this is the transport layer to the Unity build.
+
+    The client is vendored in the reference environment repository rather than
+    published on PyPI, so the usual checkout locations returned by
+    :func:`client_search_paths` are added to ``sys.path`` before the import is
+    retried. Run ``scripts/install_noisy_tv_unity.sh`` to populate one of them.
     """
     _ensure_numpy_aliases()
     try:
         import unityagents
     except ImportError:
+        pass
+    else:
+        return unityagents
+    added = False
+    for directory in client_search_paths():
+        if directory and os.path.isdir(directory) and directory not in sys.path:
+            sys.path.insert(0, directory)
+            added = True
+    if not added:
+        return None
+    try:
+        import unityagents
+    except ImportError:
         return None
     return unityagents
+
+
+def unity_client_available() -> bool:
+    """Check whether the upstream ``unityagents`` client can be imported.
+
+    Input: None.
+    Output: ``True`` when the client module is importable or discoverable.
+    Mathematical meaning: None; it gates the Unity backend.
+    """
+    return _client_module() is not None
+
+
+def player_search_paths() -> Tuple[str, ...]:
+    """Return the candidate paths of the upstream Unity player.
+
+    Input: None; reads the ``NOISY_TV_UNITY_BINARY`` environment variable.
+    Output: Tuple of candidate ``file_name`` values (without the platform
+        suffix), most specific first: the configured path, then the standard
+        locations used by ``scripts/install_noisy_tv_unity.sh``, then the bare
+        executable name in the working directory.
+    Mathematical meaning: None; it locates the original build so that the
+        training pipeline can drive it instead of the reconstruction.
+    """
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    configured = os.environ.get("NOISY_TV_UNITY_BINARY", "").strip()
+    candidates: List[str] = []
+    if configured:
+        candidates.append(configured)
+    for root in client_search_paths():
+        candidates.extend(
+            [
+                os.path.join(root, "build", DEFAULT_FILE_NAME),
+                os.path.join(root, "Builds", DEFAULT_FILE_NAME),
+                os.path.join(root, "builds", DEFAULT_FILE_NAME),
+                os.path.join(root, "tv_maze_linux", DEFAULT_FILE_NAME),
+                os.path.join(root, DEFAULT_FILE_NAME),
+            ]
+        )
+    candidates.extend(
+        [
+            os.path.join(project_root, "third_party", "tv_maze", DEFAULT_FILE_NAME),
+            os.path.join(project_root, "third_party", DEFAULT_FILE_NAME),
+            DEFAULT_FILE_NAME,
+        ]
+    )
+    return tuple(candidates)
+
+
+def resolve_player_path(file_name: Optional[str] = None) -> Optional[str]:
+    """Find the upstream player executable, honouring the search paths.
+
+    Input: Optional explicit ``file_name`` (the value used by the upstream
+        client, without the platform suffix); ``None`` searches the standard
+        locations.
+    Output: The ``file_name`` value to hand to the upstream client, or ``None``
+        when no player is present.
+    Mathematical meaning: None; it decides whether the original build can be
+        launched at all.
+
+    An explicit ``file_name`` is tried first and then the standard locations are
+    searched, so a configuration that names the player by its bare executable
+    name still finds a build installed elsewhere (for example the one
+    ``NOISY_TV_UNITY_BINARY`` points at). Resolution is the single definition of
+    "a player can be launched", which keeps :func:`unity_available` and
+    :class:`UnityEnvironmentAdapter` in agreement.
+    """
+    candidates = player_search_paths()
+    if file_name:
+        candidates = (file_name,) + tuple(
+            candidate for candidate in candidates if candidate != file_name
+        )
+    for candidate in candidates:
+        if candidate and unity_binary_available(candidate):
+            return candidate
+    return None
 
 
 def unity_binary_available(file_name: str = DEFAULT_FILE_NAME) -> bool:
@@ -185,21 +309,98 @@ def unity_binary_available(file_name: str = DEFAULT_FILE_NAME) -> bool:
     return False
 
 
+def port_available(base_port: int, worker_id: int) -> bool:
+    """Check whether a client could bind the port of ``worker_id``.
+
+    Input: Base port and worker id.
+    Output: ``True`` when ``base_port + worker_id`` can be bound.
+    Mathematical meaning: None; it tests the socket the client will use.
+
+    The probe mirrors the upstream client exactly: same address, same
+    ``SO_REUSEADDR`` option, so a ``True`` here means the client's own bind
+    succeeds and a ``False`` means it would raise "worker number N is still in
+    use".
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(("localhost", base_port + worker_id))
+    except OSError:
+        return False
+    finally:
+        probe.close()
+    return True
+
+
+def worker_id_candidates(config: NoisyTVUnityConfig) -> List[int]:
+    """List the worker ids a new player may use, most preferred first.
+
+    Input: Configuration whose ``worker_id`` is the preferred offset.
+    Output: Worker ids from the configured one up to
+        :data:`WORKER_ID_SEARCH_LIMIT` offsets, sharing ``base_port``.
+    Mathematical meaning: None; the port offsets available to a new player.
+    """
+    first = int(config.worker_id)
+    return list(range(first, first + WORKER_ID_SEARCH_LIMIT))
+
+
+def connect_player(module: Any, config: NoisyTVUnityConfig) -> Any:
+    """Launch a player on the first worker id whose port is free.
+
+    Input: Imported ``unityagents`` module and the adapter configuration.
+    Output: A connected upstream client, with ``config.worker_id`` updated to
+        the worker actually used.
+    Mathematical meaning: Instantiates one independently addressable player,
+        which is what makes several parallel environments possible.
+
+    A training run creates several environments in one process and every
+    client would otherwise ask for worker ``0``; scanning for a free port keeps
+    that working without hand-assigned ids, while an explicit ``worker_id`` is
+    still honoured whenever its port is free.
+    """
+    for worker_id in worker_id_candidates(config):
+        if not port_available(config.base_port, worker_id):
+            continue
+        try:
+            client = module.UnityEnvironment(
+                file_name=config.file_name,
+                worker_id=worker_id,
+                base_port=config.base_port,
+            )
+        except OSError:
+            # Another process claimed the port between the probe and the bind;
+            # try the next free offset instead of failing the whole run.
+            continue
+        config.worker_id = worker_id
+        return client
+    last_port = config.base_port + int(config.worker_id) + WORKER_ID_SEARCH_LIMIT - 1
+    raise RuntimeError(
+        "no free worker id for the Noisy-TV player: every port from "
+        f"{config.base_port + int(config.worker_id)} to {last_port} is in use; "
+        "close the running players or pass a different base_port"
+    )
+
+
 def unity_available(config: Optional[NoisyTVUnityConfig] = None) -> bool:
     """Check whether the original Unity build can be created right now.
 
     Input: Optional configuration naming the executable.
-    Output: ``True`` when the client package imports and an executable exists.
+    Output: ``True`` when the client package imports and an executable can be
+        resolved for that configuration.
     Mathematical meaning: None; it gates the ``"auto"`` backend choice.
+
+    This asks exactly the question :class:`UnityEnvironmentAdapter` asks before
+    it launches the player, so a ``True`` here always means the adapter can be
+    built (and a ``False`` never hides a launcher that does exist).
     """
     configuration = config or NoisyTVUnityConfig()
     if _client_module() is None:
         return False
-    return unity_binary_available(configuration.file_name)
+    return resolve_player_path(configuration.file_name) is not None
 
 
-class UnityEnvironmentAdapter:
-    """Gymnasium-style adapter around the upstream ``unityagents`` client.
+class UnityEnvironmentAdapter(gym.Env):
+    """Gymnasium adapter around the upstream ``unityagents`` client.
 
     Args:
         config: Connection and reset parameters of the player.
@@ -214,6 +415,11 @@ class UnityEnvironmentAdapter:
     goal is *reconstructed* from the upstream state ``(x, z)`` because the
     upstream brain does not expose it; with the upstream goal at
     ``(-10, 60)`` this reproduces the reward criterion exactly.
+
+    The class is a real :class:`gymnasium.Env` subclass because
+    ``gymnasium.make`` rejects entry points whose class does not inherit from
+    it, and ``--env NoisyTVUnity-v0`` must go through ``gymnasium.make`` like
+    every other environment in the pipeline.
     """
 
     def __init__(
@@ -228,6 +434,7 @@ class UnityEnvironmentAdapter:
         Mathematical meaning: Establishes the interface through which rollouts
             sample transitions from the upstream MDP.
         """
+        super().__init__()
         self.config = config or NoisyTVUnityConfig()
         self.backend = "unity"
         if client is None:
@@ -238,17 +445,17 @@ class UnityEnvironmentAdapter:
                     "`python -m pip install -e path/to/noisy-tv-env` (the package is vendored "
                     "in that repository) or use the pure-python NoisyTVMaze-v0 instead"
                 )
-            if not unity_binary_available(self.config.file_name):
+            resolved = resolve_player_path(self.config.file_name)
+            if resolved is None:
+                searched = "\n  ".join(player_search_paths())
                 raise RuntimeError(
                     f"no Unity player matching {self.config.file_name!r} was found; download the "
                     "build linked in the README of https://github.com/luchris429/noisy-tv-env "
-                    "and pass its path through NoisyTVUnityConfig(file_name=...)"
+                    "(or run scripts/install_noisy_tv_unity.sh) and pass its path through "
+                    f"NoisyTVUnityConfig(file_name=...); searched:\n  {searched}"
                 )
-            client = module.UnityEnvironment(
-                file_name=self.config.file_name,
-                worker_id=self.config.worker_id,
-                base_port=self.config.base_port,
-            )
+            self.config.file_name = resolved
+            client = connect_player(module, self.config)
         self.client = client
         self.brain_name = self.client.brain_names[0]
         self.brain = self.client.brains[self.brain_name]
@@ -447,6 +654,21 @@ def register_environment(environment_id: str = ENVIRONMENT_ID) -> str:
     return environment_id
 
 
+def preferred_environment_id(
+    unity_config: Optional[NoisyTVUnityConfig] = None,
+) -> str:
+    """Return the Noisy-TV ID to use by default.
+
+    Input: Optional Unity configuration.
+    Output: :data:`ENVIRONMENT_ID` (the original Unity build) when the upstream
+        client and the player executable are both available, otherwise
+        :data:`MAZE_ENVIRONMENT_ID` (the pure-python reconstruction).
+    Mathematical meaning: Both IDs describe the same MDP family; this picks the
+        reference implementation whenever it can be driven.
+    """
+    return ENVIRONMENT_ID if unity_available(unity_config) else MAZE_ENVIRONMENT_ID
+
+
 def make_noisy_tv_environment(
     backend: str = "auto",
     **backend_kwargs: Any,
@@ -491,7 +713,16 @@ __all__ = [
     "UnityEnvironmentAdapter",
     "make_noisy_tv_environment",
     "make_unity_environment",
+    "preferred_environment_id",
     "register_environment",
     "unity_available",
     "unity_binary_available",
+    "unity_client_available",
+    "resolve_player_path",
+    "player_search_paths",
+    "client_search_paths",
+    "port_available",
+    "worker_id_candidates",
+    "connect_player",
+    "WORKER_ID_SEARCH_LIMIT",
 ]

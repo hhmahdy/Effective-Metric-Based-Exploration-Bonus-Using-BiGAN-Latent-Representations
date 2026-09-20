@@ -321,14 +321,18 @@ def _space_dimensions(environment: object) -> tuple[tuple[int, ...], int, bool]:
         source_environment = environment.environments[0]
     else:
         source_environment = environment
-    observation_space = getattr(source_environment.environment, "observation_space", None)
-    action_space = getattr(source_environment.environment, "action_space", None)
+    # Callers normally hand in the pipeline's single-environment wrapper, which
+    # keeps the gymnasium environment it wraps in ``environment``; a raw
+    # gymnasium-style environment (for example the Unity adapter returned by
+    # ``make_noisy_tv_environment("unity")``) is accepted as well.
+    inner_environment = getattr(source_environment, "environment", source_environment)
+    observation_space = getattr(inner_environment, "observation_space", None)
+    action_space = getattr(inner_environment, "action_space", None)
     if observation_space is None or action_space is None:
         raise TypeError("environment must expose observation_space and action_space")
-    if isinstance(environment, VectorEnvironmentAdapter):
-        observation_shape = environment.observation_shape
-    else:
-        observation_shape = environment.observation_shape
+    observation_shape = getattr(source_environment, "observation_shape", None)
+    if observation_shape is None and hasattr(observation_space, "shape"):
+        observation_shape = tuple(observation_space.shape)
     if not observation_shape:
         raise ValueError("observation space shape cannot be empty")
     if hasattr(action_space, "n"):

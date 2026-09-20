@@ -160,9 +160,21 @@ print(environment_or_unity.backend)             # "unity" or "python"
 
 The Unity adapter never falls back silently: `backend="unity"` raises with
 instructions rather than quietly switching environment in the middle of a
-comparison. Its protocol translation (upstream `BrainInfo` messages into the
-pipeline's transition tuple, including the `[0, 1]` grayscale frames that the
-upstream client can return) is covered by tests driving a stub client.
+comparison. The build is found in the locations the installer script uses, or
+through `NOISY_TV_UNITY_BINARY=/path/to/tv_maze`; when a training run builds
+several environments in one process (`--num-parallel-envs`), each player gets
+its own worker id (port), so one process can drive many players at once.
+
+`tests/test_noisy_tv_unity_integration.py` covers the Unity path **without the
+Unity binary**, because the binary is distributed out of band and is often
+unavailable (no Google Drive access, no GPU, no display). It starts the
+genuine `unityagents` client, which binds a socket, launches
+`tests/fixtures/fake_tv_maze_player.py` as `tv_maze.x86_64`, and decodes the
+frames it sends back; only the Unity engine itself is simulated. That suite
+drives the real transport end to end: frames, rewards and termination, the
+`startLoc`/`door`/`tv` reset parameters, the noisy-versus-static television
+phenomenon, graceful player shutdown, `gymnasium.make("NoisyTVUnity-v0")`, and
+two parallel players on distinct ports.
 
 ```bash
 # default: NoisyTVMaze-v0, 96 envs, 12.288M steps, seeds 0 1 2
@@ -172,8 +184,10 @@ bash scripts/run_master_experiments.sh
 DEVICE=cpu NUM_ENVS=16 TOTAL_STEPS=1024000 SEEDS="0 1 2" \
     bash scripts/run_master_experiments.sh
 
-# the original Unity build (needs the upstream player executable + client)
-ENV_NAME=NoisyTVUnity-v0 bash scripts/run_master_experiments.sh
+# the original Unity build (needs the upstream player executable + client);
+# NOISY_TV_UNITY_BINARY points at the build when it is not in a default location
+NOISY_TV_UNITY_BINARY=/opt/tv_maze/tv_maze \
+    ENV_NAME=NoisyTVUnity-v0 bash scripts/run_master_experiments.sh
 
 # the Atari benchmark used elsewhere in the thesis
 ENV_NAME=ALE/MontezumaRevenge-v5 DEVICE=cuda bash scripts/run_master_experiments.sh
@@ -777,6 +791,16 @@ and under `tv="noisy"` a stationary agent keeps receiving different
 observations while the reward stays zero), state snapshots for `--resettable`,
 adapter and `build_config` integration for both Master's methods, and the Unity
 adapter's protocol translation against a stub client.
+
+`tests/test_noisy_tv_unity_integration.py` covers the original Unity path
+end to end while simulating only the Unity engine: the real `unityagents`
+client, the real socket protocol, the real `tv_maze.x86_64` launch, and real
+frame decoding, driven against `tests/fixtures/fake_tv_maze_player.py`. That
+includes the noisy-versus-static television phenomenon, the upstream reset
+parameters, graceful shutdown of the player process, discovery of the build
+(including `NOISY_TV_UNITY_BINARY`), construction of
+`gymnasium.make("NoisyTVUnity-v0")`, and several parallel players on distinct
+worker ids. The suite skips itself when the client or `Pillow` is missing.
 
 `tests/test_master_transition.py` covers the Master's method: the analytic L2
 prediction error, the MSE forward-model objective, one-hot action encoding,
