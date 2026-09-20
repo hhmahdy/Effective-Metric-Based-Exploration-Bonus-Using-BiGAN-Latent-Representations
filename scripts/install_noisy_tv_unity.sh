@@ -123,6 +123,12 @@ or anywhere else and point the adapter at it:
 
 Until then the pipeline keeps using the pure-python reconstruction of the same
 maze (NoisyTVMaze-v0), which needs neither the player nor a display.
+
+To check that the client, the socket protocol, and the adapter all work while
+you wait for the download, run the python half of this path against the
+protocol stand-in of the test suite:
+
+  bash scripts/smoke_unity_path.sh
 EOF
     exit 1
 fi

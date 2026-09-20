@@ -540,6 +540,8 @@ Adventurer/
 ├── scripts/
 │   ├── run_master_experiments.sh   # Master's experiment driver
 │   ├── smoke_master.sh             # tiny CPU smoke test
+│   ├── smoke_unity_path.sh         # NoisyTVUnity-v0 smoke run, no Unity build needed
+│   ├── install_noisy_tv_unity.sh   # clone the client, fetch the Unity player
 │   ├── summarize_master_results.py # master_summary.csv + per-seed metrics.csv
 │   └── plot_master_results.py      # the five thesis figures
 ├── environments/
@@ -551,9 +553,12 @@ Adventurer/
 │   └── comparison.py
 ├── requirements-master.txt
 └── tests/
-    ├── test_master_transition.py   # Master's method tests + smoke runs
-    ├── test_noisy_tv_maze.py       # Noisy-TV maze + Unity adapter tests
-    └── test_metric_eme.py          # LEGACY EME/metric tests (kept, passing)
+    ├── fixtures/
+    │   └── fake_tv_maze_player.py    # player half of the upstream protocol (tests only)
+    ├── test_master_transition.py     # Master's method tests + smoke runs
+    ├── test_noisy_tv_maze.py         # Noisy-TV maze + Unity adapter tests
+    ├── test_noisy_tv_unity_integration.py  # the real client + protocol, no Unity binary
+    └── test_metric_eme.py            # LEGACY EME/metric tests (kept, passing)
 ```
 
 ## Installation
@@ -791,6 +796,20 @@ and under `tv="noisy"` a stationary agent keeps receiving different
 observations while the reward stays zero), state snapshots for `--resettable`,
 adapter and `build_config` integration for both Master's methods, and the Unity
 adapter's protocol translation against a stub client.
+
+Where the build cannot be downloaded (no Google Drive access, no GPU, no
+display), the python half of the path can still be exercised end to end with the
+protocol stand-in of the test suite:
+
+```bash
+# NoisyTVUnity-v0 smoke run without the Unity build: the real unityagents
+# client, socket, launch, and frame decoding, with simulated Unity frames
+bash scripts/smoke_unity_path.sh
+
+# the real build, once it is installed
+NOISY_TV_UNITY_BINARY=/opt/tv_maze/tv_maze \
+    ENV_NAME=NoisyTVUnity-v0 bash scripts/run_master_experiments.sh
+```
 
 `tests/test_noisy_tv_unity_integration.py` covers the original Unity path
 end to end while simulating only the Unity engine: the real `unityagents`
