@@ -91,18 +91,35 @@ python -m pip install -r requirements-master.txt   # verified versions + notes
 ```
 
 `requirements-master.txt` documents the verified stack (Python 3.11.2, torch
-2.14.0, gymnasium 1.3.0, numpy 2.4.6, ale-py 0.12.1) and explains the
-platform-dependent CUDA/CPU wheel situation. Atari environments need `ale-py`
-(for `ALE/MontezumaRevenge-v5`); the Noisy-TV maze and the smoke test do not.
-Running the original Unity build additionally needs the upstream `unityagents`
-client, `Pillow`, and the player executable - see the environment section
-below.
+2.14.0, gymnasium 1.3.0, gymnasium-robotics 1.4.2, mujoco 3.3.7, numpy 2.4.6,
+ale-py 0.12.1) and explains the platform-dependent CUDA/CPU wheel situation.
+The default environment, `FetchPickAndPlace-v4`, needs `gymnasium-robotics` and
+MuJoCo - note that requirements-master.txt pins `mujoco==3.3.7`, because
+gymnasium-robotics 1.4.2 cannot construct the Fetch tasks against MuJoCo 3.14
+(its joint-type assertion rejects the numpy integer dtype that 3.14 returns).
+Atari environments need `ale-py` (for `ALE/MontezumaRevenge-v5`); the Noisy-TV
+maze and the smoke test do not. Running the original Unity build additionally
+needs the upstream `unityagents` client, `Pillow`, and the player executable -
+see the environment section below.
 
-### The Noisy-TV maze (default environment)
+### Environments
 
-The default environment is the **Noisy-TV maze** of *Large-Scale Study of
-Curiosity-Driven Learning* (ICLR 2019), whose reference implementation is the
-Unity project [`luchris429/noisy-tv-env`](https://github.com/luchris429/noisy-tv-env)
+`run_master_experiments.sh` and `main.py` accept any registered Gymnasium ID
+through `--env`/`ENV_NAME`. The default is **`FetchPickAndPlace-v4`**, the
+sparse-reward goal-conditioned manipulation task of Gymnasium-Robotics: a
+Fetch arm with four continuous action dimensions must move a block to a target
+resampled every episode, the reward is -1 per step and 0 on success, and the
+observation is the goal-conditioned dictionary (25 + 3 + 3 = 31 values, which
+the pipeline flattens). Because its actions are continuous, it exercises the
+Gaussian policy path rather than the categorical one, and because its reward is
+sparse it is exactly the setting where an intrinsic exploration bonus is meant
+to help.
+
+The thesis's own environment, the **Noisy-TV maze** of *Large-Scale Study of
+Curiosity-Driven Learning* (ICLR 2019), remains available:
+`ENV_NAME=NoisyTVMaze-v0` (or `NoisyTVUnity-v0` for the original Unity build).
+Its reference implementation is the Unity project
+[`luchris429/noisy-tv-env`](https://github.com/luchris429/noisy-tv-env)
 ("The Noisy TV Environment from Large-Scale Study of Curiosity-Driven
 Learning"). In that task an agent navigates a maze of rooms and corridors that
 contains a television whose content keeps changing at random; the television is
@@ -120,8 +137,8 @@ sparse `+1` reward within 2.5 units of the goal sphere, and the
 | `NoisyTVMaze-v0` | `environments/noisy_tv_maze.py`, pure-python reconstruction | `gymnasium` only |
 | `NoisyTVUnity-v0` | `environments/noisy_tv_unity.py`, Gymnasium adapter around the **original Unity build** and the `unityagents` client vendored in the upstream repository | the upstream player executable (download link in that repository's README), `unityagents`, and `Pillow` |
 
-The reconstruction is the default because it needs nothing beyond the pinned
-stack. It is not a sketch: the 138 wall cubes, 17 rooms, 18 hallways, 16 start
+The reconstruction needs nothing beyond the pinned stack, so it also runs where
+MuJoCo or Unity cannot. It is not a sketch: the 138 wall cubes, 17 rooms, 18 hallways, 16 start
 poses, the television plane, the goal sphere, the sliding door, and the button
 semantics (one shared modulo-ten counter, channel changes only within 18 units)
 were all read out of the upstream Unity scene and agent scripts, and the module
@@ -177,12 +194,15 @@ phenomenon, graceful player shutdown, `gymnasium.make("NoisyTVUnity-v0")`, and
 two parallel players on distinct ports.
 
 ```bash
-# default: NoisyTVMaze-v0, 96 envs, 12.288M steps, seeds 0 1 2
+# default: FetchPickAndPlace-v4, 96 envs, 12.288M steps, seeds 0 1 2
 bash scripts/run_master_experiments.sh
 
 # a quick CPU-friendly scale
 DEVICE=cpu NUM_ENVS=16 TOTAL_STEPS=1024000 SEEDS="0 1 2" \
     bash scripts/run_master_experiments.sh
+
+# the Noisy-TV maze of the ICLR-2019 study (pure-python reconstruction)
+ENV_NAME=NoisyTVMaze-v0 bash scripts/run_master_experiments.sh
 
 # the original Unity build (needs the upstream player executable + client);
 # NOISY_TV_UNITY_BINARY points at the build when it is not in a default location
@@ -229,15 +249,21 @@ directory (`OVERWRITE=1` overrides), stops immediately on the first failed run
 also be launched by hand:
 
 ```bash
-# the default environment (the Noisy-TV maze) on CPU
-python main.py --method state      --env NoisyTVMaze-v0 --seed 0 \
+# the default environment (FetchPickAndPlace-v4) on CPU
+python main.py --method state      --env FetchPickAndPlace-v4 --seed 0 \
     --num-parallel-envs 8 --rollout-steps 128 --minibatch-size 32 \
     --total-environment-steps 1024000 --device cpu \
     --output-directory results/master/state/seed_0
-python main.py --method transition --env NoisyTVMaze-v0 --seed 0 \
+python main.py --method transition --env FetchPickAndPlace-v4 --seed 0 \
     --num-parallel-envs 8 --rollout-steps 128 --minibatch-size 32 \
     --total-environment-steps 1024000 --device cpu \
     --output-directory results/master/transition/seed_0
+
+# the Noisy-TV maze of the ICLR-2019 study
+python main.py --method state      --env NoisyTVMaze-v0 --seed 0 \
+    --num-parallel-envs 8 --rollout-steps 128 --minibatch-size 32 \
+    --total-environment-steps 1024000 --device cpu \
+    --output-directory results/master_nv/state/seed_0
 
 # the thesis benchmark
 python main.py --method state      --env ALE/MontezumaRevenge-v5 --seed 0 \
@@ -546,7 +572,7 @@ Adventurer/
 │   └── plot_master_results.py      # the five thesis figures
 ├── environments/
 │   ├── adapter.py
-│   ├── noisy_tv_maze.py        # Noisy-TV maze of the ICLR-2019 study [default ENV_NAME]
+│   ├── noisy_tv_maze.py        # Noisy-TV maze of the ICLR-2019 study (NoisyTVMaze-v0)
 │   ├── noisy_tv_unity.py       # adapter for the original Unity build (NoisyTVUnity-v0)
 │   └── vector_adapter.py
 ├── evaluation/

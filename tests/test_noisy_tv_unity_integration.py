@@ -507,6 +507,9 @@ class PlayerDiscoveryTest(unittest.TestCase):
                 self.assertEqual(resolve_player_path(), file_name)
                 self.assertTrue(unity_binary_available(file_name))
 
+    @unittest.skipUnless(
+        unity_client_available(), "the upstream unityagents client is not installed"
+    )
     def test_explicit_name_falls_back_to_the_configured_build(self) -> None:
         """A bare ``file_name`` still finds the build ``NOISY_TV_UNITY_BINARY`` names.
 
@@ -595,6 +598,7 @@ def _parse_arguments(argv: List[str]):
 if __name__ == "__main__":
     unittest.main()
 
+@unittest.skipUnless(unity_client_available(), "the upstream unityagents client is not installed")
 class UnityPipelineIntegrationTest(unittest.TestCase):
     """``--env NoisyTVUnity-v0`` must work through the pipeline's own factory.
 

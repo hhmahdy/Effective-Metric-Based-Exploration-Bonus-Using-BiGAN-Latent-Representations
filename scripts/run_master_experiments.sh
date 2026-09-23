@@ -19,28 +19,38 @@
 # (--novelty transition) are NOT part of this experiment and are never launched
 # by this script.
 #
-# Environment: the default is the Noisy-TV maze of "Large-Scale Study of
-# Curiosity-Driven Learning" (the Unity project luchris429/noisy-tv-env),
-# reconstructed in pure python in environments/noisy_tv_maze.py: 17 rooms and
-# 18 corridors, 84x84 RGB first-person frames, six discrete actions, a sparse
-# +1 reward 2.5 units from the goal sphere, and the stochastic television the
-# paper uses to expose the noisy-TV failure mode.
+# Environment: the default is the sparse-reward, goal-conditioned manipulation
+# task FetchPickAndPlace-v4 of Gymnasium-Robotics. The agent controls a
+# Fetch robotic arm with four continuous action dimensions and must move a block
+# to a target position that is resampled every episode; the reward is -1 per
+# step and 0 on success, so the only way to score is to reach the goal, which is
+# what an intrinsic exploration bonus is supposed to accelerate. Its observation
+# is the usual goal-conditioned dictionary (observation, achieved_goal,
+# desired_goal), which the pipeline flattens into a fixed vector, and its
+# actions are continuous, so this environment also exercises the Gaussian policy
+# path instead of the categorical one.
 #
-#   ENV_NAME=NoisyTVMaze-v0    the reconstruction (no Unity, no ROM, CPU-friendly)
-#   ENV_NAME=NoisyTVUnity-v0   the original Unity build, when the executable
-#                              and the upstream `unityagents` client are present
+#   ENV_NAME=FetchPickAndPlace-v4      the default (needs gymnasium-robotics + mujoco)
+#   ENV_NAME=NoisyTVMaze-v0    the pure-python reconstruction of the Noisy-TV
+#                              maze of "Large-Scale Study of Curiosity-Driven
+#                              Learning" (no Unity, no ROM, CPU-friendly)
+#   ENV_NAME=NoisyTVUnity-v0   the original Unity build of that maze, when the
+#                              executable and the upstream `unityagents` client
+#                              are present
 #   ENV_NAME=ALE/MontezumaRevenge-v5   the Atari benchmark used elsewhere in the thesis
 #
 # Usage:
-#   bash scripts/run_master_experiments.sh
+#   bash scripts/run_master_experiments.sh                          # FetchPickAndPlace-v4
 #   DEVICE=cpu NUM_ENVS=16 TOTAL_STEPS=1024000 SEEDS="0 1 2" \
 #       bash scripts/run_master_experiments.sh                      # quick scale
+#   ENV_NAME=NoisyTVMaze-v0 bash scripts/run_master_experiments.sh  # the Noisy-TV maze
 #   ENV_NAME=ALE/MontezumaRevenge-v5 DEVICE=cuda NUM_ENVS=96 \
 #       TOTAL_STEPS=12288000 SEEDS="0 1 2" bash scripts/run_master_experiments.sh
 #
 # Configurable variables (defaults in brackets):
-#   ENV_NAME              [NoisyTVMaze-v0]  or any registered Gymnasium ID,
-#                                           e.g. NoisyTVUnity-v0,
+#   ENV_NAME              [FetchPickAndPlace-v4]  or any registered Gymnasium ID,
+#                                           e.g. NoisyTVMaze-v0,
+#                                           NoisyTVUnity-v0,
 #                                           ALE/MontezumaRevenge-v5,
 #                                           CartPole-v1
 #   DEVICE                [auto]     auto|cpu|cuda  (auto = cuda if available)
@@ -68,7 +78,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "${SCRIPT_DIR}")"
 cd "${ROOT_DIR}"
 
-ENV_NAME="${ENV_NAME:-NoisyTVMaze-v0}"
+ENV_NAME="${ENV_NAME:-FetchPickAndPlace-v4}"
 DEVICE="${DEVICE:-auto}"
 NUM_ENVS="${NUM_ENVS:-96}"
 ROLLOUT_STEPS="${ROLLOUT_STEPS:-128}"
@@ -145,6 +155,16 @@ try:
     print(f"ale-py     {ale_py.__version__}")
 except ImportError:
     print("ale-py     not installed (required for ALE/* environments)")
+try:
+    import mujoco
+    print(f"mujoco     {mujoco.__version__}")
+except ImportError:
+    print("mujoco     not installed (required for Fetch*/Hand*/Adroit* environments)")
+try:
+    import gymnasium_robotics
+    print(f"robotics   {gymnasium_robotics.__version__}")
+except ImportError:
+    print("robotics   not installed (required for Fetch*/Hand*/Adroit* environments)")
 PY
 then
     echo "ERROR: dependency check failed. Install with:" >&2
@@ -155,6 +175,32 @@ fi
 if [[ "${ENV_NAME}" == ALE/* ]]; then
     if ! "${PYTHON}" -c "import ale_py" >/dev/null 2>&1; then
         echo "ERROR: ${ENV_NAME} requires ale-py (see requirements-master.txt)" >&2
+        exit 1
+    fi
+fi
+
+# The Gymnasium-Robotics environments (Fetch*, Hand*, Adroit*, PointMaze*,
+# AntMaze*) need their package and MuJoCo. Constructing one here surfaces a
+# broken installation immediately: gymnasium-robotics 1.4.2 cannot build the
+# Fetch tasks against mujoco 3.14 (its own joint-type assertion rejects the
+# numpy dtype that MuJoCo 3.14 returns), which is why requirements-master.txt
+# pins mujoco.
+if [[ "${ENV_NAME}" == Fetch* || "${ENV_NAME}" == Hand* || "${ENV_NAME}" == Adroit* || "${ENV_NAME}" == PointMaze* || "${ENV_NAME}" == AntMaze* ]]; then
+    if ! "${PYTHON}" -c "
+import gymnasium as gym
+try:
+    import gymnasium_robotics
+except ImportError as error:
+    raise SystemExit('gymnasium-robotics is not installed (or MuJoCo is missing)') from error
+gym.register_envs(gymnasium_robotics)
+environment = gym.make('${ENV_NAME}')
+environment.close()
+" >/dev/null 2>&1; then
+        echo "ERROR: ${ENV_NAME} could not be created." >&2
+        echo "       It needs gymnasium-robotics and MuJoCo; install the pinned versions with:" >&2
+        echo "         ${PYTHON} -m pip install -r requirements-master.txt" >&2
+        echo "       A common cause is a MuJoCo release that gymnasium-robotics cannot drive;" >&2
+        echo "       requirements-master.txt pins a combination that is verified to work." >&2
         exit 1
     fi
 fi
