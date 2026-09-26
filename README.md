@@ -90,6 +90,15 @@ python -m venv .venv && source .venv/bin/activate
 python -m pip install -r requirements-master.txt   # verified versions + notes
 ```
 
+Each run writes `config.json`, `run_info.json`, `metrics.jsonl`, and
+`run.log`. `config.json`'s `environment` section is derived from the
+environment that was actually created rather than from defaults - it records
+the registered `environment_id`, the observation shape and action dimension,
+the episode horizon read from the environment's registration, and whether
+observations are 8-bit images that are stacked and scaled (`NoisyTVMaze-v0`:
+84x84x3, 1000 steps, stacked, scaled) or plain vectors (`FetchPickAndPlace-v4`:
+31 values, 50 steps, unstacked, unscaled).
+
 `requirements-master.txt` documents the verified stack (Python 3.11.2, torch
 2.14.0, gymnasium 1.3.0, gymnasium-robotics 1.4.2, mujoco 3.3.7, numpy 2.4.6,
 ale-py 0.12.1) and explains the platform-dependent CUDA/CPU wheel situation.
@@ -628,13 +637,27 @@ stack recorded in `requirements-master.txt`.
 > `scripts/smoke_master.sh`, `scripts/run_master_experiments.sh`). The generic
 > commands below document the underlying pipeline and its legacy selectors.
 
-The default command uses `CartPole-v1`, which is useful for validating the
-pipeline interface:
+Without `--env`, `main.py` trains on the same default as the Master's driver,
+`FetchPickAndPlace-v4`, which is what a bare run should reproduce:
+
+```bash
+python main.py \
+  --seed 0 \
+  --num-parallel-envs 4 \
+  --total-environment-steps 10000 \
+  --device cpu \
+  --output-directory runs/fetch_pick_and_place
+```
+
+`CartPole-v1` remains the quickest way to validate the pipeline interface
+without MuJoCo:
 
 ```bash
 python main.py \
   --environment-id CartPole-v1 \
+  --num-parallel-envs 4 \
   --seed 0 \
+  --device cpu \
   --total-environment-steps 10000 \
   --output-directory runs/cartpole
 ```
@@ -656,9 +679,11 @@ Disable intrinsic rewards for an extrinsic-only PPO ablation:
 
 ```bash
 python main.py \
-  --environment-id CartPole-v1 \
+  --environment-id FetchPickAndPlace-v4 \
   --disable-intrinsic-reward \
-  --output-directory runs/cartpole_extrinsic_only
+  --total-environment-steps 10000 \
+  --device cpu \
+  --output-directory runs/fetch_extrinsic_only
 ```
 
 Available command-line options can be inspected with:
@@ -772,7 +797,7 @@ the BiGAN trainer.
 Use a fixed seed:
 
 ```bash
-python main.py --environment-id CartPole-v1 --seed 0
+python main.py --environment-id FetchPickAndPlace-v4 --seed 0
 ```
 
 The seed utility configures:

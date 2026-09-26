@@ -57,6 +57,15 @@ def _parse_boolean(value: str) -> bool:
     raise argparse.ArgumentTypeError(f"expected a boolean value, got {value!r}")
 
 
+#: Environment the pipeline and the Master's experiment driver train on when
+#: ``--env``/``ENV_NAME`` is not given. ``FetchPickAndPlace-v4`` is
+#: gymnasium-robotics' sparse-reward goal-conditioned manipulation task (four
+#: continuous actions, a 31-value dictionary observation, ``-1`` per step and
+#: ``0`` on success), which is the setting an intrinsic exploration bonus is
+#: meant to accelerate. ``scripts/run_master_experiments.sh`` defaults to the
+#: same id; change both together if it ever moves.
+DEFAULT_ENVIRONMENT_ID = "FetchPickAndPlace-v4"
+
 NOVELTY_ALIASES = {
     # V1 baseline: Adventurer reconstruction novelty B(s).
     "bigan": ("state", False),
@@ -97,7 +106,13 @@ def parse_args() -> argparse.Namespace:
         "--environment-id",
         "--env",
         dest="environment_id",
-        default="CartPole-v1",
+        default=DEFAULT_ENVIRONMENT_ID,
+        help=(
+            "registered Gymnasium id to train on "
+            f"(default: {DEFAULT_ENVIRONMENT_ID}, the environment the Master's "
+            "experiment uses; pass e.g. NoisyTVMaze-v0 or ALE/MontezumaRevenge-v5 "
+            "for the other environments)"
+        ),
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-parallel-envs", type=int, default=96)
@@ -309,6 +324,89 @@ def _validate_method_selection(
     return args
 
 
+def _environment_candidates(environment: object) -> list:
+    """List the objects that may carry environment metadata.
+
+    Input: The environment handed to :func:`build_config`, which may be the
+        pipeline's single-environment adapter, its vector adapter, or a raw
+        Gymnasium environment.
+    Output: The environment, the Gymnasium environment each one wraps when
+        there is one, and the unwrapped environments, in that order.
+    Mathematical meaning: None; metadata lookup.
+    """
+    roots = (
+        list(environment.environments)
+        if isinstance(environment, VectorEnvironmentAdapter)
+        else [environment]
+    )
+    candidates = []
+    for root in roots:
+        for candidate in (root, getattr(root, "environment", None)):
+            if candidate is None:
+                continue
+            candidates.append(candidate)
+            unwrapped = getattr(candidate, "unwrapped", None)
+            if unwrapped is not None and unwrapped is not candidate:
+                candidates.append(unwrapped)
+    return candidates
+
+
+def _episode_horizon(environment: object, fallback: int) -> int:
+    """Read the truncation horizon the environment actually applies.
+
+    Input: A wrapped environment and the value to use when it cannot be read.
+    Output: Positive step limit.
+    Mathematical meaning: The episode length ``T`` after which a trajectory is
+        truncated, recorded so ``config.json`` describes the run faithfully.
+
+    ``gymnasium.make`` records the limit in the environment's registration
+    ``spec``; environments implemented in this repository and some wrappers
+    expose it as an attribute instead. Without this the recorded horizon would
+    be the image default (27,000 steps) even for an environment that truncates
+    after 50 steps.
+    """
+    candidates = _environment_candidates(environment)
+    for candidate in candidates:
+        spec = getattr(candidate, "spec", None)
+        horizon = getattr(spec, "max_episode_steps", None)
+        if isinstance(horizon, int) and horizon > 0:
+            return horizon
+    for candidate in candidates:
+        for attribute in ("max_episode_steps", "max_steps"):
+            horizon = getattr(candidate, attribute, None)
+            if isinstance(horizon, int) and horizon > 0:
+                return horizon
+    return fallback
+
+
+def _preprocessing(observation_is_image: bool) -> tuple[int, bool]:
+    """Describe the input preprocessing the observation type needs.
+
+    Input: Whether the environment produces image observations.
+    Output: ``(frame_stack, normalize_pixels)``.
+    Mathematical meaning: Both entries describe the state representation fed to
+        the encoder; they are recorded so the configuration matches the
+        environment instead of assuming images.
+
+    Image observations are stacked (the Atari/Noisy-TV setting) and scaled to
+    ``[0, 1]``; vector observations such as
+    ``FetchPickAndPlace-v4``'s 31-value state are used as they are.
+    """
+    return (4, True) if observation_is_image else (1, False)
+
+
+def _observation_is_image(observation_space: object) -> bool:
+    """Report whether an observation space holds 8-bit images.
+
+    Input: A Gymnasium observation space.
+    Output: ``True`` for ``uint8`` spaces (the pixel environments), ``False``
+        for dictionary and floating-point spaces.
+    Mathematical meaning: Distinguishes pixel states from vector states.
+    """
+    dtype = getattr(observation_space, "dtype", None)
+    return dtype is not None and str(dtype) == "uint8"
+
+
 def _space_dimensions(environment: object) -> tuple[tuple[int, ...], int, bool]:
     """Extract observation and action dimensions from a wrapped environment.
 
@@ -357,12 +455,27 @@ def build_config(
     """
     observation_shape, action_dim, discrete_actions = _space_dimensions(environment)
     base = ExperimentConfig()
+    observation_space = None
+    for candidate in _environment_candidates(environment):
+        observation_space = getattr(candidate, "observation_space", None)
+        if observation_space is not None:
+            break
+    observation_is_image = _observation_is_image(observation_space)
+    frame_stack, normalize_pixels = _preprocessing(observation_is_image)
     environment_config = replace(
         base.environment,
+        environment_id=args.environment_id,
         observation_shape=observation_shape,
         action_dim=action_dim,
         discrete_actions=discrete_actions,
         num_parallel_envs=args.num_parallel_envs,
+        # Derived from the environment rather than assumed: the defaults in
+        # EnvironmentConfig describe the 84x84x4 Atari/Noisy-TV setting, and
+        # recording them for, say, a 50-step Fetch episode would misdescribe
+        # the run's own configuration file.
+        max_episode_steps=_episode_horizon(environment, base.environment.max_episode_steps),
+        frame_stack=frame_stack,
+        normalize_pixels=normalize_pixels,
     )
     ppo_config = replace(
         base.ppo,

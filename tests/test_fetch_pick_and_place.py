@@ -89,6 +89,23 @@ class DriverDefaultTest(unittest.TestCase):
         script = DRIVER.read_text()
         self.assertIn(f"[{DEFAULT_ENVIRONMENT}]", script, "the usage text must state the default")
 
+    def test_python_entry_point_defaults_to_the_same_environment(self) -> None:
+        """``main.py`` without ``--env`` trains on ``FetchPickAndPlace-v4``.
+
+        Input: ``main.parse_args`` driven with no environment argument.
+        Output: Assertions on the parsed id and on the module constant.
+        Mathematical meaning: None; it fixes the environment ``config.json``
+            and ``run_info.json`` record for a default run.
+        """
+        import main as main_module
+
+        with mock.patch.object(sys, "argv", ["main.py"]):
+            arguments = main_module.parse_args()
+        self.assertEqual(arguments.environment_id, DEFAULT_ENVIRONMENT)
+        self.assertEqual(main_module.DEFAULT_ENVIRONMENT_ID, DEFAULT_ENVIRONMENT)
+        # The driver and the python entry point must not drift apart.
+        self.assertEqual(_default_environment_name(), main_module.DEFAULT_ENVIRONMENT_ID)
+
     def test_driver_documents_that_the_default_is_configurable(self) -> None:
         """The driver keeps the environment overridable by name.
 
@@ -206,6 +223,33 @@ class FetchPickAndPlaceTest(unittest.TestCase):
         self.assertEqual(configuration.environment.action_dim, 4)
         self.assertFalse(configuration.environment.discrete_actions)
 
+    def test_recorded_configuration_describes_the_environment(self) -> None:
+        """``config.json`` records the environment's real limits and inputs.
+
+        Input: ``build_config`` for the default environment.
+        Output: Assertions on the recorded id, horizon, and preprocessing.
+        Mathematical meaning: The configuration file is the record of the
+            experiment, so the episode length ``T`` and the state
+            representation it reports must be the ones the run used.
+
+        The dataclass defaults describe the 84x84x4 Atari/Noisy-TV setting; a
+        50-step vector-observation task must not inherit them.
+        """
+        import main as main_module
+
+        environment = make_gymnasium_environment(DEFAULT_ENVIRONMENT)
+        try:
+            with mock.patch.object(sys, "argv", ["main.py", "--method", "transition"]):
+                arguments = main_module.parse_args()
+            configuration = main_module.build_config(arguments, environment)
+        finally:
+            environment.close()
+        recorded = configuration.environment
+        self.assertEqual(recorded.environment_id, DEFAULT_ENVIRONMENT)
+        self.assertEqual(recorded.max_episode_steps, 50)
+        self.assertEqual(recorded.frame_stack, 1)
+        self.assertFalse(recorded.normalize_pixels)
+
     def test_parallel_environments_are_independent(self) -> None:
         """Several Fetch environments can be built for batched rollouts.
 
@@ -288,3 +332,55 @@ class SingleEnvironmentAdapterContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class RecordedEnvironmentMetadataTest(unittest.TestCase):
+    """The record must follow the environment, not the image defaults."""
+
+    def _recorded_environment(self, environment_id: str):
+        """Build the configuration a run of ``environment_id`` would record.
+
+        Input: Registered Gymnasium id.
+        Output: The ``EnvironmentConfig`` written to ``config.json``.
+        Mathematical meaning: None; it exercises the metadata derivation.
+        """
+        import main as main_module
+
+        environment = make_gymnasium_environment(environment_id)
+        try:
+            with mock.patch.object(
+                sys, "argv", ["main.py", "--env", environment_id, "--method", "state"]
+            ):
+                arguments = main_module.parse_args()
+            return main_module.build_config(arguments, environment).environment
+        finally:
+            environment.close()
+
+    def test_image_environment_keeps_pixel_preprocessing(self) -> None:
+        """A ``uint8`` image environment is recorded as pixels, not vectors.
+
+        Input: ``NoisyTVMaze-v0``, whose observations are 84x84x3 ``uint8``.
+        Output: Assertions on the recorded id, horizon, and preprocessing.
+        Mathematical meaning: Confirms the derivation distinguishes pixel
+            states from vector states instead of always answering one way.
+        """
+        recorded = self._recorded_environment("NoisyTVMaze-v0")
+        self.assertEqual(recorded.environment_id, "NoisyTVMaze-v0")
+        self.assertEqual(recorded.observation_shape, (84, 84, 3))
+        self.assertEqual(recorded.max_episode_steps, 1000)
+        self.assertEqual(recorded.frame_stack, 4)
+        self.assertTrue(recorded.normalize_pixels)
+
+    def test_vector_environment_records_its_own_horizon(self) -> None:
+        """A vector environment records its registration horizon.
+
+        Input: ``CartPole-v1``, registered with a 500-step limit.
+        Output: Assertions on the recorded horizon and preprocessing.
+        Mathematical meaning: The horizon is read from the environment's
+            ``spec``, not assumed to be the image default.
+        """
+        recorded = self._recorded_environment("CartPole-v1")
+        self.assertEqual(recorded.environment_id, "CartPole-v1")
+        self.assertEqual(recorded.observation_shape, (4,))
+        self.assertEqual(recorded.max_episode_steps, 500)
+        self.assertEqual(recorded.frame_stack, 1)
+        self.assertFalse(recorded.normalize_pixels)
