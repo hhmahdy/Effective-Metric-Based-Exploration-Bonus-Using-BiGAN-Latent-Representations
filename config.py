@@ -80,8 +80,16 @@ class SeedConfig:
 
 @dataclass(frozen=True)
 class EnvironmentConfig:
-    """Describe the interface and episode limits of the RL environment."""
+    """Describe the interface and episode limits of the RL environment.
 
+    ``environment_id`` is the registered Gymnasium id the run was created from
+    (``main.build_config`` fills it in from ``--env``), so ``config.json``
+    identifies its environment without cross-referencing ``run_info.json``;
+    ``max_episode_steps``, ``frame_stack``, and ``normalize_pixels`` are
+    descriptive and are also derived from the actual environment.
+    """
+
+    environment_id: str = ""
     observation_shape: tuple[int, ...] = (84, 84, 4)
     action_dim: int = 4
     discrete_actions: bool = True

@@ -19,3 +19,7 @@ env/
 .idea/
 .vscode/
 .DS_Store
+
+# Upstream environments cloned by scripts/install_noisy_tv_unity.sh
+# (the unityagents client and the Unity player build are not redistributed here).
+third_party/

@@ -90,10 +90,142 @@ python -m venv .venv && source .venv/bin/activate
 python -m pip install -r requirements-master.txt   # verified versions + notes
 ```
 
+Each run writes `config.json`, `run_info.json`, `metrics.jsonl`, and
+`run.log`. `config.json`'s `environment` section is derived from the
+environment that was actually created rather than from defaults - it records
+the registered `environment_id`, the observation shape and action dimension,
+the episode horizon read from the environment's registration, and whether
+observations are 8-bit images that are stacked and scaled (`NoisyTVMaze-v0`:
+84x84x3, 1000 steps, stacked, scaled) or plain vectors (`FetchPickAndPlace-v4`:
+31 values, 50 steps, unstacked, unscaled).
+
 `requirements-master.txt` documents the verified stack (Python 3.11.2, torch
-2.14.0, gymnasium 1.3.0, numpy 2.4.6, ale-py 0.12.1) and explains the
-platform-dependent CUDA/CPU wheel situation. Atari environments need `ale-py`
-(for `ALE/MontezumaRevenge-v5`); the smoke test does not.
+2.14.0, gymnasium 1.3.0, gymnasium-robotics 1.4.2, mujoco 3.3.7, numpy 2.4.6,
+ale-py 0.12.1) and explains the platform-dependent CUDA/CPU wheel situation.
+The default environment, `FetchPickAndPlace-v4`, needs `gymnasium-robotics` and
+MuJoCo - note that requirements-master.txt pins `mujoco==3.3.7`, because
+gymnasium-robotics 1.4.2 cannot construct the Fetch tasks against MuJoCo 3.14
+(its joint-type assertion rejects the numpy integer dtype that 3.14 returns).
+Atari environments need `ale-py` (for `ALE/MontezumaRevenge-v5`); the Noisy-TV
+maze and the smoke test do not. Running the original Unity build additionally
+needs the upstream `unityagents` client, `Pillow`, and the player executable -
+see the environment section below.
+
+### Environments
+
+`run_master_experiments.sh` and `main.py` accept any registered Gymnasium ID
+through `--env`/`ENV_NAME`. The default is **`FetchPickAndPlace-v4`**, the
+sparse-reward goal-conditioned manipulation task of Gymnasium-Robotics: a
+Fetch arm with four continuous action dimensions must move a block to a target
+resampled every episode, the reward is -1 per step and 0 on success, and the
+observation is the goal-conditioned dictionary (25 + 3 + 3 = 31 values, which
+the pipeline flattens). Because its actions are continuous, it exercises the
+Gaussian policy path rather than the categorical one, and because its reward is
+sparse it is exactly the setting where an intrinsic exploration bonus is meant
+to help.
+
+The thesis's own environment, the **Noisy-TV maze** of *Large-Scale Study of
+Curiosity-Driven Learning* (ICLR 2019), remains available:
+`ENV_NAME=NoisyTVMaze-v0` (or `NoisyTVUnity-v0` for the original Unity build).
+Its reference implementation is the Unity project
+[`luchris429/noisy-tv-env`](https://github.com/luchris429/noisy-tv-env)
+("The Noisy TV Environment from Large-Scale Study of Curiosity-Driven
+Learning"). In that task an agent navigates a maze of rooms and corridors that
+contains a television whose content keeps changing at random; the television is
+unpredictable *and* irrelevant to the task, so the setting is the canonical
+demonstration that prediction-error novelty can be captured by a stochastic
+distractor.
+
+Two interchangeable implementations of that maze are provided, both exposing
+the upstream interface (84x84 RGB first-person frames, six discrete actions, a
+sparse `+1` reward within 2.5 units of the goal sphere, and the
+`startLoc`/`door`/`tv` episode conditions):
+
+| ID | implementation | requirements |
+|---|---|---|
+| `NoisyTVMaze-v0` | `environments/noisy_tv_maze.py`, pure-python reconstruction | `gymnasium` only |
+| `NoisyTVUnity-v0` | `environments/noisy_tv_unity.py`, Gymnasium adapter around the **original Unity build** and the `unityagents` client vendored in the upstream repository | the upstream player executable (download link in that repository's README), `unityagents`, and `Pillow` |
+
+The reconstruction needs nothing beyond the pinned stack, so it also runs where
+MuJoCo or Unity cannot. It is not a sketch: the 138 wall cubes, 17 rooms, 18 hallways, 16 start
+poses, the television plane, the goal sphere, the sliding door, and the button
+semantics (one shared modulo-ten counter, channel changes only within 18 units)
+were all read out of the upstream Unity scene and agent scripts, and the module
+documents its four deliberate differences (discrete time, 15-degree rotations,
+ray-cast rendering, and synthetic channel images replacing the bundled
+photographs). Observations are RGB because the upstream camera declares
+`blackAndWhite: 0`, so the convolutional PPO/BiGAN path and both the pixel and
+the feature novelty terms are exercised exactly as on Atari.
+
+The maze is sealed and fully connected, and the reward sits behind the sliding
+door: with the upstream default `door=1` (closed) the goal is unreachable from
+most start poses until the agent presses action `4` often enough to open it.
+Together with the stochastic television, this is exactly the setting the thesis
+instruments:
+
+* `tv="noisy"` (default) redraws the screen every step, so a stationary agent
+  in front of the television receives a permanently changing observation that
+  no predictor can model; `tv="static"` is the deterministic control;
+* watching the television pays nothing - the distractor is purely
+  observational, which the test suite asserts.
+
+```python
+import gymnasium as gym
+from environments.noisy_tv_unity import register_environment, make_noisy_tv_environment
+
+register_environment()                          # registers both IDs
+environment = gym.make("NoisyTVMaze-v0", tv="noisy", door=1.0)
+observation, info = environment.reset(seed=0)   # info: distance_to_goal, distance_to_television, ...
+
+# "auto" uses the original Unity build when its executable and client are
+# installed and falls back to the reconstruction otherwise; "unity" and
+# "python" force one of the two.
+environment_or_unity = make_noisy_tv_environment("auto", image_size=84)
+print(environment_or_unity.backend)             # "unity" or "python"
+```
+
+The Unity adapter never falls back silently: `backend="unity"` raises with
+instructions rather than quietly switching environment in the middle of a
+comparison. The build is found in the locations the installer script uses, or
+through `NOISY_TV_UNITY_BINARY=/path/to/tv_maze`; when a training run builds
+several environments in one process (`--num-parallel-envs`), each player gets
+its own worker id (port), so one process can drive many players at once.
+
+`tests/test_noisy_tv_unity_integration.py` covers the Unity path **without the
+Unity binary**, because the binary is distributed out of band and is often
+unavailable (no Google Drive access, no GPU, no display). It starts the
+genuine `unityagents` client, which binds a socket, launches
+`tests/fixtures/fake_tv_maze_player.py` as `tv_maze.x86_64`, and decodes the
+frames it sends back; only the Unity engine itself is simulated. That suite
+drives the real transport end to end: frames, rewards and termination, the
+`startLoc`/`door`/`tv` reset parameters, the noisy-versus-static television
+phenomenon, graceful player shutdown, `gymnasium.make("NoisyTVUnity-v0")`, and
+two parallel players on distinct ports.
+
+```bash
+# default: FetchPickAndPlace-v4, 96 envs, 12.288M steps, seeds 0 1 2
+bash scripts/run_master_experiments.sh
+
+# a quick CPU-friendly scale
+DEVICE=cpu NUM_ENVS=16 TOTAL_STEPS=1024000 SEEDS="0 1 2" \
+    bash scripts/run_master_experiments.sh
+
+# the Noisy-TV maze of the ICLR-2019 study (pure-python reconstruction)
+ENV_NAME=NoisyTVMaze-v0 bash scripts/run_master_experiments.sh
+
+# the original Unity build (needs the upstream player executable + client);
+# NOISY_TV_UNITY_BINARY points at the build when it is not in a default location
+NOISY_TV_UNITY_BINARY=/opt/tv_maze/tv_maze \
+    ENV_NAME=NoisyTVUnity-v0 bash scripts/run_master_experiments.sh
+
+# the Atari benchmark used elsewhere in the thesis
+ENV_NAME=ALE/MontezumaRevenge-v5 DEVICE=cuda bash scripts/run_master_experiments.sh
+```
+
+`DEVICE` defaults to `auto`, which selects CUDA when it is available and CPU
+otherwise, so the default command runs on a laptop as well as on a GPU node.
+`NUM_ENVS`, `ROLLOUT_STEPS`, `TOTAL_STEPS`, and `BIGAN_BATCH_SIZE` keep their
+thesis values; lower them (as in the 1.024M-step example above) for a quick run.
 
 ### Smoke test (tiny, CPU, a few minutes at most)
 
@@ -109,19 +241,14 @@ output files exist (`config.json`, `run_info.json`, `metrics.jsonl`,
 `run.log`), the two methods share one configuration, the aggregation and
 figure scripts run, and the whole unit test suite passes. Montezuma is
 deliberately not used; override with `SMOKE_ENV=ALE/MontezumaRevenge-v5
-SMOKE_TOTAL_STEPS=256` to exercise the real environment briefly.
+SMOKE_TOTAL_STEPS=256` to exercise the real environment briefly, or run the
+smoke test on the Noisy-TV maze with
+`SMOKE_ENV=NoisyTVMaze-v0 SMOKE_TOTAL_STEPS=256`.
 
 ### Full experiment
 
-```bash
-# default: ALE/MontezumaRevenge-v5, 96 envs, 12.288M steps, seeds 0 1 2
-bash scripts/run_master_experiments.sh
-
-# example overrides
-DEVICE=cuda NUM_ENVS=96 TOTAL_STEPS=12288000 SEEDS="0 1 2" \
-    bash scripts/run_master_experiments.sh
-DEVICE=cpu SEEDS="0 1 2 3 4" bash scripts/run_master_experiments.sh
-```
+The command lines, the `DEVICE=auto` default, and the scale overrides are given
+in the environment section above.
 
 The driver runs `state` seeds 0,1,2 then `transition` seeds 0,1,2, writes
 `training.log` per run, prints the git commit before training, verifies
@@ -131,6 +258,23 @@ directory (`OVERWRITE=1` overrides), stops immediately on the first failed run
 also be launched by hand:
 
 ```bash
+# the default environment (FetchPickAndPlace-v4) on CPU
+python main.py --method state      --env FetchPickAndPlace-v4 --seed 0 \
+    --num-parallel-envs 8 --rollout-steps 128 --minibatch-size 32 \
+    --total-environment-steps 1024000 --device cpu \
+    --output-directory results/master/state/seed_0
+python main.py --method transition --env FetchPickAndPlace-v4 --seed 0 \
+    --num-parallel-envs 8 --rollout-steps 128 --minibatch-size 32 \
+    --total-environment-steps 1024000 --device cpu \
+    --output-directory results/master/transition/seed_0
+
+# the Noisy-TV maze of the ICLR-2019 study
+python main.py --method state      --env NoisyTVMaze-v0 --seed 0 \
+    --num-parallel-envs 8 --rollout-steps 128 --minibatch-size 32 \
+    --total-environment-steps 1024000 --device cpu \
+    --output-directory results/master_nv/state/seed_0
+
+# the thesis benchmark
 python main.py --method state      --env ALE/MontezumaRevenge-v5 --seed 0 \
     --num-parallel-envs 96 --rollout-steps 128 --minibatch-size 32 \
     --total-environment-steps 12288000 --device cuda \
@@ -431,17 +575,25 @@ Adventurer/
 ├── scripts/
 │   ├── run_master_experiments.sh   # Master's experiment driver
 │   ├── smoke_master.sh             # tiny CPU smoke test
+│   ├── smoke_unity_path.sh         # NoisyTVUnity-v0 smoke run, no Unity build needed
+│   ├── install_noisy_tv_unity.sh   # clone the client, fetch the Unity player
 │   ├── summarize_master_results.py # master_summary.csv + per-seed metrics.csv
 │   └── plot_master_results.py      # the five thesis figures
 ├── environments/
 │   ├── adapter.py
+│   ├── noisy_tv_maze.py        # Noisy-TV maze of the ICLR-2019 study (NoisyTVMaze-v0)
+│   ├── noisy_tv_unity.py       # adapter for the original Unity build (NoisyTVUnity-v0)
 │   └── vector_adapter.py
 ├── evaluation/
 │   └── comparison.py
 ├── requirements-master.txt
 └── tests/
-    ├── test_master_transition.py   # Master's method tests + smoke runs
-    └── test_metric_eme.py          # LEGACY EME/metric tests (kept, passing)
+    ├── fixtures/
+    │   └── fake_tv_maze_player.py    # player half of the upstream protocol (tests only)
+    ├── test_master_transition.py     # Master's method tests + smoke runs
+    ├── test_noisy_tv_maze.py         # Noisy-TV maze + Unity adapter tests
+    ├── test_noisy_tv_unity_integration.py  # the real client + protocol, no Unity binary
+    └── test_metric_eme.py            # LEGACY EME/metric tests (kept, passing)
 ```
 
 ## Installation
@@ -485,13 +637,27 @@ stack recorded in `requirements-master.txt`.
 > `scripts/smoke_master.sh`, `scripts/run_master_experiments.sh`). The generic
 > commands below document the underlying pipeline and its legacy selectors.
 
-The default command uses `CartPole-v1`, which is useful for validating the
-pipeline interface:
+Without `--env`, `main.py` trains on the same default as the Master's driver,
+`FetchPickAndPlace-v4`, which is what a bare run should reproduce:
+
+```bash
+python main.py \
+  --seed 0 \
+  --num-parallel-envs 4 \
+  --total-environment-steps 10000 \
+  --device cpu \
+  --output-directory runs/fetch_pick_and_place
+```
+
+`CartPole-v1` remains the quickest way to validate the pipeline interface
+without MuJoCo:
 
 ```bash
 python main.py \
   --environment-id CartPole-v1 \
+  --num-parallel-envs 4 \
   --seed 0 \
+  --device cpu \
   --total-environment-steps 10000 \
   --output-directory runs/cartpole
 ```
@@ -513,9 +679,11 @@ Disable intrinsic rewards for an extrinsic-only PPO ablation:
 
 ```bash
 python main.py \
-  --environment-id CartPole-v1 \
+  --environment-id FetchPickAndPlace-v4 \
   --disable-intrinsic-reward \
-  --output-directory runs/cartpole_extrinsic_only
+  --total-environment-steps 10000 \
+  --device cpu \
+  --output-directory runs/fetch_extrinsic_only
 ```
 
 Available command-line options can be inspected with:
@@ -629,7 +797,7 @@ the BiGAN trainer.
 Use a fixed seed:
 
 ```bash
-python main.py --environment-id CartPole-v1 --seed 0
+python main.py --environment-id FetchPickAndPlace-v4 --seed 0
 ```
 
 The seed utility configures:
@@ -668,6 +836,41 @@ tests) with either runner:
 python -m unittest discover -s tests -p "test_*.py" -v
 python -m pytest tests -q
 ```
+
+`tests/test_noisy_tv_maze.py` covers the Noisy-TV environment: the upstream
+geometry (138 walls, 17 rooms, 18 hallways, 16 start poses), wall collision,
+seeded determinism, the sparse reward and terminate-vs-truncate behaviour, the
+sliding door (modulo-ten button counter in both deterministic and randomized
+modes, the closed door sealing the goal wing, and the agent passing through
+once the door is open), the television (channels change only within 18 units,
+and under `tv="noisy"` a stationary agent keeps receiving different
+observations while the reward stays zero), state snapshots for `--resettable`,
+adapter and `build_config` integration for both Master's methods, and the Unity
+adapter's protocol translation against a stub client.
+
+Where the build cannot be downloaded (no Google Drive access, no GPU, no
+display), the python half of the path can still be exercised end to end with the
+protocol stand-in of the test suite:
+
+```bash
+# NoisyTVUnity-v0 smoke run without the Unity build: the real unityagents
+# client, socket, launch, and frame decoding, with simulated Unity frames
+bash scripts/smoke_unity_path.sh
+
+# the real build, once it is installed
+NOISY_TV_UNITY_BINARY=/opt/tv_maze/tv_maze \
+    ENV_NAME=NoisyTVUnity-v0 bash scripts/run_master_experiments.sh
+```
+
+`tests/test_noisy_tv_unity_integration.py` covers the original Unity path
+end to end while simulating only the Unity engine: the real `unityagents`
+client, the real socket protocol, the real `tv_maze.x86_64` launch, and real
+frame decoding, driven against `tests/fixtures/fake_tv_maze_player.py`. That
+includes the noisy-versus-static television phenomenon, the upstream reset
+parameters, graceful shutdown of the player process, discovery of the build
+(including `NOISY_TV_UNITY_BINARY`), construction of
+`gymnasium.make("NoisyTVUnity-v0")`, and several parallel players on distinct
+worker ids. The suite skips itself when the client or `Pillow` is missing.
 
 `tests/test_master_transition.py` covers the Master's method: the analytic L2
 prediction error, the MSE forward-model objective, one-hot action encoding,
